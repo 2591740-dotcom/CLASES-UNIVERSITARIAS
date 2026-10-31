@@ -401,12 +401,11 @@
   async function detail(id) {
     const row = await one(id);
     const slides = await rest("GET", `/rest/v1/diapositivas?clase_id=eq.${id}&select=orden,tiempo,imagen_path&order=orden.asc`) || [];
-    const frames = [];
-    for (const slide of slides) {
+    const frames = (await Promise.all(slides.map(async (slide) => {
       const file = await sign(slide.imagen_path || "");
-      if (!file) continue;
-      frames.push({ file, time: slide.tiempo || 0 });
-    }
+      if (!file) return null;
+      return { file, time: slide.tiempo || 0 };
+    }))).filter(Boolean);
     const watch = typeof youtubeHref === "function" ? youtubeHref(row.video_url || "") : "";
     const local = watch ? "" : await localSrc(id);
     const remote = watch ? "" : playback(row.video_url || "");
@@ -496,7 +495,7 @@
     if (claves.length && typeof avisoDuplicado === "function" && typeof clavesDeFila === "function") {
       let rows = null;
       try {
-        rows = await rest("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio&limit=1000");
+        rows = await rest("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio->fuentes&limit=1000");
       } catch {
         rows = null;
       }
@@ -1023,7 +1022,7 @@
       const cursos = await cursosDeEstudio();
       const pack = publicarCursos(cursos, readCursoId());
       if (!pack.activo) return { classes: [], cursos: pack };
-      const rows = await rest("GET", `/rest/v1/clases?select=id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio&curso_id=eq.${pack.activo}&order=creado.desc`);
+      const rows = await rest("GET", `/rest/v1/clases?select=id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio->titulo,estudio->titulo_custom,estudio->fecha_clase,estudio->hora_clase,estudio->avisos&curso_id=eq.${pack.activo}&order=creado.desc`);
       const estudio = estudioActual();
       const list = (Array.isArray(rows) ? rows : []).filter((row) => (
         estudio

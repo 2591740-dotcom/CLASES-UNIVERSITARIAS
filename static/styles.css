@@ -16,6 +16,8 @@
 
 * { box-sizing: border-box; }
 
+button, a, .card { touch-action: manipulation; }
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -353,7 +355,7 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 .card.holding {
   transform: scale(0.985);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
-  transition: transform 1s ease, box-shadow 1s ease;
+  transition: transform 160ms ease, box-shadow 160ms ease;
 }
 
 .card.dragging {
@@ -659,6 +661,8 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 10px 0 4px;
 }
 
@@ -834,7 +838,12 @@ button.topic-mark b {
 .moments button:hover { border-color: var(--brass); }
 .moments b { color: var(--brass); font-weight: 650; margin-right: 8px; }
 
-.line { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.line {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}
 .line b { color: var(--brass); font-weight: 650; }
 
 .chat {

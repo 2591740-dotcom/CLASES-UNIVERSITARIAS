@@ -4,6 +4,8 @@ const keybar = document.querySelector("#keybar");
 const FILE_ACCEPT = "video/*,audio/*,.mp4,.mkv,.webm,.mov,.m4v,.avi,.m4a,.mp3,.wav,.aac,.ogg";
 
 let poll = 0;
+let homeToken = 0;
+let homeCache = null;
 let shown = "";
 let clase = null;
 let setup = null;
@@ -1295,19 +1297,14 @@ function abrirPreparar() {
   });
 }
 
-async function showHome() {
-  cerrarPreparar(true);
-  cerrarCursoModal();
-  closeWikiPeek();
-  stopSpeech();
-  stopPoll();
-  shown = "";
-  clase = null;
-  document.title = "ClaseClara";
-  const [status, list] = await Promise.all([
-    api("/api/status"),
-    api("/api/classes"),
-  ]);
+function cursoVisible() {
+  const pack = window.CLASECLARA_CURSOS;
+  return (pack && pack.activo) || "";
+}
+
+function pintarInicio(status, list) {
+  const conservar = Boolean(document.querySelector(".grid"));
+  const y = conservar ? window.scrollY : 0;
   renderKey(status);
   clearYouTube();
   unbindMiniPlayer();
@@ -1373,18 +1370,50 @@ async function showHome() {
       if (file) setInputFile(fileInput, file);
     });
   }
-  if (!drop || !document.querySelector("#path")) return;
-  drop.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    drop.classList.add("over");
-  });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (event) => {
-    event.preventDefault();
-    drop.classList.remove("over");
-    const file = event.dataTransfer.files && event.dataTransfer.files[0];
-    if (file) uploadFile(file);
-  });
+  if (drop && document.querySelector("#path")) {
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      drop.classList.add("over");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      drop.classList.remove("over");
+      const file = event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) uploadFile(file);
+    });
+  }
+  if (y) window.scrollTo(0, y);
+}
+
+async function showHome() {
+  const token = ++homeToken;
+  cerrarPreparar(true);
+  cerrarCursoModal();
+  closeWikiPeek();
+  stopSpeech();
+  stopPoll();
+  shown = "";
+  clase = null;
+  document.title = "ClaseClara";
+  const curso = cursoVisible();
+  if (homeCache && homeCache.curso === curso) pintarInicio(homeCache.status, homeCache.list);
+  let status;
+  let list;
+  try {
+    [status, list] = await Promise.all([
+      api("/api/status"),
+      api("/api/classes"),
+    ]);
+  } catch (error) {
+    if (token !== homeToken || shown !== "") return;
+    if (homeCache && homeCache.curso === curso) return;
+    throw error;
+  }
+  if (token !== homeToken || shown !== "") return;
+  const cursos = window.claseClaraCloud ? list.cursos : resolverCursoPc(list.cursos);
+  homeCache = { curso: (cursos && cursos.activo) || curso, status, list };
+  pintarInicio(status, list);
 }
 
 function idsDelGrid(grid) {
@@ -1681,6 +1710,7 @@ function bindProcess(job) {
 function renderProcess(job) {
   const same = document.querySelector("#process")?.dataset.id === (job.id || "") && shown === job.status;
   if (!same) {
+    homeToken += 1;
     stopSpeech();
     clearYouTube();
     unbindMiniPlayer();
@@ -1943,6 +1973,9 @@ async function removeClass(id) {
   if (!confirm("¿Borrar esta clase de ClaseClara? El video original no se toca.")) return;
   if (!confirm("Confirma otra vez. La clase se borra y no se puede recuperar.")) return;
   await api(`/api/classes/${id}`, { method: "DELETE" });
+  if (homeCache && Array.isArray(homeCache.list?.classes)) {
+    homeCache.list.classes = homeCache.list.classes.filter((item) => item.id !== id);
+  }
   showHome();
 }
 
@@ -1950,11 +1983,12 @@ function frameNote(study, index) {
   return (study.capturas || []).find((shot) => shot.indice === index + 1);
 }
 
-function frameButton(src, time, label, extra) {
+function frameButton(src, time, label, extra, eager) {
   const when = time ? ` data-time="${esc(time)}"` : "";
   const name = time ? `Ampliar captura, ${time}` : "Ampliar captura";
+  const loading = eager ? "" : ' loading="lazy"';
   return `<button type="button" class="frame-open" data-src="${esc(src)}"${when} data-label="${esc(label || "")}" aria-label="${esc(name)}">
-    <img src="${esc(src)}" alt="">
+    <img src="${esc(src)}" alt=""${loading} decoding="async">
     ${extra || ""}
   </button>`;
 }
@@ -2123,6 +2157,26 @@ function playerHtml(data) {
   return `<div class="player-mark"></div><div class="player-slot">${playerButtons(false)}<${tag} id="player" class="player" controls playsinline preload="metadata" src="${esc(src)}"></${tag}></div>`;
 }
 
+function htmlDelPanel(data, id) {
+  const study = data.study || {};
+  if (id === "avisos") return noticesHtml(data);
+  if (id === "explicacion") return explainHtml(study, data.frames, data.lines);
+  if (id === "resumen") return summaryHtml(study);
+  if (id === "esquema") return mapHtml(study);
+  if (id === "glosario") return termsHtml(study);
+  if (id === "repaso") return quizHtml(study);
+  if (id === "casos") return casesHtml(study);
+  if (id === "capturas") return shotsHtml(data);
+  if (id === "links") return linksHtml(study);
+  if (id === "texto") return transcriptHtml(data.lines || []);
+  return "";
+}
+
+function panelDeEstudio(data, id, oculto, activo) {
+  const listo = id === activo;
+  return `<div data-panel="${id}"${oculto ? " hidden" : ""}${listo ? ' data-listo="1"' : ""}>${listo ? htmlDelPanel(data, id) : ""}</div>`;
+}
+
 function studyHtml(data) {
   const study = data.study || {};
   const hasNotices = (study.avisos || []).length > 0;
@@ -2133,7 +2187,7 @@ function studyHtml(data) {
     const stamp = durationStamp(frame.time);
     const label = note?.que_muestra || stamp;
     const detail = label !== stamp ? `<span class="film-note">${esc(label)}</span>` : "";
-    return frameButton(frameSrc(data, frame.file), stamp, label, `<span class="film-time">${esc(stamp)}</span>${detail}`);
+    return frameButton(frameSrc(data, frame.file), stamp, label, `<span class="film-time">${esc(stamp)}</span>${detail}`, index < 4);
   }).join("");
   const player = playerHtml(data);
   const when = durationLabel(data.duration);
@@ -2183,16 +2237,16 @@ function studyHtml(data) {
           ${tab("texto", "Transcripción", false)}
         </div>
         <div id="panels">
-          <div data-panel="avisos" ${hasNotices ? "" : "hidden"}>${noticesHtml(data)}</div>
-          <div data-panel="explicacion" ${hasNotices ? "hidden" : ""}>${explainHtml(study, data.frames, data.lines)}</div>
-          <div data-panel="resumen" hidden>${summaryHtml(study)}</div>
-          <div data-panel="esquema" hidden>${mapHtml(study)}</div>
-          <div data-panel="glosario" hidden>${termsHtml(study)}</div>
-          <div data-panel="repaso" hidden>${quizHtml(study)}</div>
-          ${(study.casos || []).length ? `<div data-panel="casos" hidden>${casesHtml(study)}</div>` : ""}
-          <div data-panel="capturas" hidden>${shotsHtml(data)}</div>
-          <div data-panel="links" hidden>${linksHtml(study)}</div>
-          <div data-panel="texto" hidden>${transcriptHtml(data.lines || [])}</div>
+          ${panelDeEstudio(data, "avisos", !hasNotices, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "explicacion", hasNotices, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "resumen", true, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "esquema", true, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "glosario", true, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "repaso", true, hasNotices ? "avisos" : "explicacion")}
+          ${(study.casos || []).length ? panelDeEstudio(data, "casos", true, hasNotices ? "avisos" : "explicacion") : ""}
+          ${panelDeEstudio(data, "capturas", true, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "links", true, hasNotices ? "avisos" : "explicacion")}
+          ${panelDeEstudio(data, "texto", true, hasNotices ? "avisos" : "explicacion")}
         </div>
       </section>
       <aside class="panel chat">
@@ -3732,17 +3786,20 @@ function bindMiniPlayer() {
   if (!slot || !mark || !mark.classList.contains("player-mark")) return;
   if (!slot.querySelector("video, audio, iframe, [data-yt]")) return;
   document.documentElement.classList.toggle("phone-app", phoneApp());
+  let needMeasure = true;
+  let headerHeight = 0;
   const watch = () => {
     miniFrame = 0;
     if (!slot.isConnected) return;
-    if (!slot.classList.contains("mini")) {
+    if (!slot.classList.contains("mini") && (needMeasure || !slot.dataset.fullHeight)) {
       const style = getComputedStyle(slot);
       const box = slot.offsetHeight + (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
       slot.dataset.fullHeight = String(Math.round(box));
+      needMeasure = false;
     }
-    const header = document.querySelector(".top")?.getBoundingClientRect().height || 0;
+    if (!headerHeight) headerHeight = document.querySelector(".top")?.getBoundingClientRect().height || 0;
     const top = mark.getBoundingClientRect().top;
-    const next = miniPlayerNext(slot.classList.contains("mini"), top, header);
+    const next = miniPlayerNext(slot.classList.contains("mini"), top, headerHeight);
     mark.style.height = next ? `${slot.dataset.fullHeight || 0}px` : "";
     const wasMini = slot.classList.contains("mini");
     slot.classList.toggle("mini", next);
@@ -3760,16 +3817,59 @@ function bindMiniPlayer() {
     if (miniFrame) return;
     miniFrame = requestAnimationFrame(watch);
   };
-  miniOnScroll = schedule;
-  window.addEventListener("scroll", schedule, { passive: true });
-  window.addEventListener("resize", schedule, { passive: true });
+  miniOnScroll = (event) => {
+    if (!event || event.type === "resize") {
+      needMeasure = true;
+      headerHeight = 0;
+    }
+    schedule();
+  };
+  window.addEventListener("scroll", miniOnScroll, { passive: true });
+  window.addEventListener("resize", miniOnScroll, { passive: true });
   bindMiniDrag(slot);
   watch();
+}
+
+function llenarPanel(id) {
+  if (!clase) return;
+  const panel = document.querySelector(`[data-panel="${id}"]`);
+  if (!panel || panel.dataset.listo === "1") return;
+  panel.innerHTML = htmlDelPanel(clase, id);
+  panel.dataset.listo = "1";
+  panel.querySelectorAll(".ver-respuesta").forEach((button) => {
+    button.onclick = () => verRespuesta(button);
+  });
+  panel.querySelectorAll(".reveal").forEach((button) => {
+    button.onclick = () => {
+      const answer = button.parentElement.querySelector(".answer");
+      answer.hidden = !answer.hidden;
+      button.textContent = answer.hidden ? "Ver respuesta" : "Ocultar respuesta";
+    };
+  });
+  const findAvisos = panel.querySelector("#find-avisos");
+  if (findAvisos) findAvisos.onclick = () => retryJob(clase.id, false);
+}
+
+function programarPaneles() {
+  const tarde = new Set(["texto", "capturas"]);
+  const pendientes = [...document.querySelectorAll("[data-panel]")].filter((panel) => panel.dataset.listo !== "1" && !tarde.has(panel.dataset.panel));
+  const paso = () => {
+    if (shown !== "study" || !clase) return;
+    const panel = pendientes.shift();
+    if (!panel) return;
+    llenarPanel(panel.dataset.panel);
+    if (!pendientes.length) return;
+    if (window.requestIdleCallback) requestIdleCallback(paso, { timeout: 500 });
+    else setTimeout(paso, 40);
+  };
+  if (window.requestIdleCallback) requestIdleCallback(paso, { timeout: 500 });
+  else setTimeout(paso, 40);
 }
 
 function elegirPestana(id) {
   stopSpeech();
   closeWikiPeek();
+  llenarPanel(id);
   document.querySelectorAll("[data-tab]").forEach((tabButton) => {
     tabButton.setAttribute("aria-selected", tabButton.dataset.tab === id ? "true" : "false");
   });
@@ -3970,6 +4070,7 @@ function seekClass(seconds) {
 }
 
 async function openClass(id) {
+  homeToken += 1;
   closeWikiPeek();
   stopSpeech();
   clearYouTube();
@@ -3987,6 +4088,7 @@ async function openClass(id) {
   document.title = data.study?.titulo || data.title || "ClaseClara";
   app.innerHTML = studyHtml(data);
   bindStudy();
+  programarPaneles();
   if (history.state && history.state.cc === "prepare") history.replaceState({ cc: "class" }, "");
   else if (!history.state || history.state.cc !== "class") history.pushState({ cc: "class" }, "");
 }

@@ -19,6 +19,7 @@ public class MainActivity extends BridgeActivity {
         WebView webView = getBridge().getWebView();
         WebSettings settings = webView.getSettings();
         settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setOffscreenPreRaster(true);
         String agent = settings.getUserAgentString();
         if (agent != null && agent.contains("; wv")) {
             settings.setUserAgentString(agent.replace("; wv", ""));
