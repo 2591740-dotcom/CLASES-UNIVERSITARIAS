@@ -1,6 +1,10 @@
 package com.claseclara.app;
 
+import android.Manifest;
+import android.app.Activity;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -11,6 +15,11 @@ import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
@@ -35,19 +44,34 @@ public class SpeechPlugin extends Plugin {
     private boolean heard = false;
     private int generation = 0;
     private int retries = 0;
-    private String pendingText = "";
+    private boolean reading = false;
+    private final List<String> pendingParts = new ArrayList<>();
     private PluginCall active;
+    private Context appContext;
+    private static SpeechPlugin live;
+
+    static void stopFromNotification() {
+        SpeechPlugin plugin = live;
+        if (plugin == null) return;
+        plugin.main.post(plugin::stopOnMain);
+    }
 
     @Override
     public void load() {
-        tts = new TextToSpeech(getContext(), status -> main.post(() -> onReady(status)));
+        live = this;
+        Context context = getContext();
+        appContext = context != null ? context.getApplicationContext() : null;
+        tts = new TextToSpeech(context, status -> main.post(() -> onReady(status)));
     }
 
     @Override
     protected void handleOnDestroy() {
+        if (live == this) live = null;
         ready = false;
+        endReading();
         PluginCall current = active;
         active = null;
+        pendingParts.clear();
         if (current != null) current.resolve();
         abandonFocus();
         if (tts != null) {
@@ -103,7 +127,13 @@ public class SpeechPlugin extends Plugin {
             @Override
             public void onStart(String utteranceId) {
                 main.post(() -> {
-                    if (matches(utteranceId)) heard = true;
+                    if (!matches(utteranceId)) return;
+                    heard = true;
+                    int index = pieceIndex(utteranceId);
+                    if (index < 0) return;
+                    JSObject data = new JSObject();
+                    data.put("index", index);
+                    notifyListeners("piece", data);
                 });
             }
 
@@ -131,7 +161,7 @@ public class SpeechPlugin extends Plugin {
             }
         });
         applySpanish();
-        if (active != null && !pendingText.isEmpty()) speakNow(pendingText);
+        if (active != null && !pendingParts.isEmpty()) speakNow();
     }
 
     private void speakOnMain(PluginCall call) {
@@ -143,28 +173,45 @@ public class SpeechPlugin extends Plugin {
         retries = 0;
         relaxed = false;
         heard = false;
-        String text = call.getString("text", "");
-        if (text == null || text.trim().isEmpty() || failed || tts == null) {
+        pendingParts.clear();
+        pendingParts.addAll(textsOf(call));
+        if (pendingParts.isEmpty() || failed || tts == null) {
             finish(false, "sin voz");
             return;
         }
-        pendingText = text.trim();
+        beginReading();
+        askNotification();
         if (!ready) return;
-        speakNow(pendingText);
+        speakNow();
     }
 
-    private void speakNow(String spoken) {
+    private List<String> textsOf(PluginCall call) {
+        List<String> list = new ArrayList<>();
+        JSArray array = call.getArray("texts");
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) {
+                String item = array.optString(i, "").trim();
+                if (!item.isEmpty()) list.add(item);
+            }
+        }
+        if (list.isEmpty()) {
+            String text = call.getString("text", "");
+            if (text != null && !text.trim().isEmpty()) list.add(text.trim());
+        }
+        return list;
+    }
+
+    private void speakNow() {
         if (tts == null || active == null) return;
         try {
-            speakPieces(spoken);
+            speakPieces(pendingParts);
         } catch (RuntimeException ex) {
             retryOrFail();
         }
     }
 
-    private void speakPieces(String spoken) {
-        spoken = spoken == null ? "" : spoken.trim();
-        if (spoken.isEmpty()) {
+    private void speakPieces(List<String> texts) {
+        if (texts == null || texts.isEmpty()) {
             finish(false, "sin voz");
             return;
         }
@@ -179,17 +226,25 @@ public class SpeechPlugin extends Plugin {
             // Keep the safe limit.
         }
         List<String> pieces = new ArrayList<>();
-        int start = 0;
-        while (start < spoken.length()) {
-            int end = Math.min(spoken.length(), start + max);
-            if (end < spoken.length()) {
-                int space = spoken.lastIndexOf(' ', end);
-                if (space > start + 40) end = space;
+        List<Integer> origins = new ArrayList<>();
+        for (int index = 0; index < texts.size(); index++) {
+            String spoken = texts.get(index) == null ? "" : texts.get(index).trim();
+            int start = 0;
+            if (spoken.isEmpty()) continue;
+            while (start < spoken.length()) {
+                int end = Math.min(spoken.length(), start + max);
+                if (end < spoken.length()) {
+                    int space = spoken.lastIndexOf(' ', end);
+                    if (space > start + 40) end = space;
+                }
+                String piece = spoken.substring(start, end).trim();
+                if (!piece.isEmpty()) {
+                    pieces.add(piece);
+                    origins.add(index);
+                }
+                if (end <= start) break;
+                start = end;
             }
-            String piece = spoken.substring(start, end).trim();
-            if (!piece.isEmpty()) pieces.add(piece);
-            if (end <= start) break;
-            start = end;
         }
         if (pieces.isEmpty()) {
             finish(false, "sin voz");
@@ -202,7 +257,7 @@ public class SpeechPlugin extends Plugin {
         params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC);
         for (int index = 0; index < pieces.size(); index++) {
             boolean last = index == pieces.size() - 1;
-            String pieceId = mine + ":" + index + (last ? ":last" : "");
+            String pieceId = mine + ":" + origins.get(index) + ":" + index + (last ? ":last" : "");
             int result = tts.speak(pieces.get(index), queue, params, pieceId);
             if (result == TextToSpeech.ERROR) {
                 retryOrFail();
@@ -231,7 +286,7 @@ public class SpeechPlugin extends Plugin {
         heard = false;
         generation += 1;
         main.postDelayed(() -> {
-            if (active != null) speakNow(pendingText);
+            if (active != null) speakNow();
         }, 300);
     }
 
@@ -239,7 +294,7 @@ public class SpeechPlugin extends Plugin {
         generation += 1;
         PluginCall current = active;
         active = null;
-        pendingText = "";
+        pendingParts.clear();
         if (tts != null) {
             try {
                 tts.stop();
@@ -248,6 +303,7 @@ public class SpeechPlugin extends Plugin {
             }
         }
         abandonFocus();
+        endReading();
         if (current != null) current.resolve();
     }
 
@@ -266,13 +322,61 @@ public class SpeechPlugin extends Plugin {
         }
     }
 
+    private int pieceIndex(String utteranceId) {
+        if (utteranceId == null) return -1;
+        String[] bits = utteranceId.split(":");
+        if (bits.length < 2) return -1;
+        try {
+            return Integer.parseInt(bits[1]);
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
+    }
+
     private void finish(boolean ok, String reason) {
         PluginCall current = active;
         active = null;
+        pendingParts.clear();
         abandonFocus();
+        endReading();
         if (current == null) return;
         if (ok) current.resolve();
         else current.reject(reason == null || reason.isEmpty() ? "sin voz" : reason);
+    }
+
+    private void beginReading() {
+        if (appContext == null) return;
+        reading = true;
+        try {
+            ReadingService.start(appContext);
+        } catch (RuntimeException ignored) {
+            // The voice still plays if the service cannot start.
+        }
+    }
+
+    private void endReading() {
+        if (!reading || appContext == null) {
+            reading = false;
+            return;
+        }
+        reading = false;
+        try {
+            ReadingService.dismiss(appContext);
+        } catch (RuntimeException ignored) {
+            // The service was already gone.
+        }
+    }
+
+    private void askNotification() {
+        if (Build.VERSION.SDK_INT < 33 || appContext == null) return;
+        if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) return;
+        Activity activity = getActivity();
+        if (activity == null) return;
+        SharedPreferences prefs = appContext.getSharedPreferences("claseclara", Context.MODE_PRIVATE);
+        if (prefs.getBoolean("notif-lectura", false)) return;
+        prefs.edit().putBoolean("notif-lectura", true).apply();
+        ActivityCompat.requestPermissions(activity, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4101);
     }
 
     private void applyRate() {
@@ -316,7 +420,7 @@ public class SpeechPlugin extends Plugin {
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build();
-            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                     .setAudioAttributes(attrs)
                     .build();
             result = audioManager.requestAudioFocus(focusRequest);
@@ -328,7 +432,7 @@ public class SpeechPlugin extends Plugin {
 
     @SuppressWarnings("deprecation")
     private int requestFocusLegacy() {
-        return audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+        return audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
     }
 
     private void abandonFocus() {
