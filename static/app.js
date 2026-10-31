@@ -616,7 +616,7 @@ function phoneHome(classes, cursos) {
     <section class="hero">
       <p class="kicker">${esc(ambito || "Tu clase, en claro")}</p>
       <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
-      <h1>La misma clase, en este aparato.</h1>
+      <h1>La mejor forma de Aprender.</h1>
       <button class="primary prepare-open" id="open-prepare" type="button">Preparar clase</button>
     </section>
     <h2>${esc(pack.nombre || "Clases")}</h2>
