@@ -2160,20 +2160,45 @@ function speechFor(tab, data) {
   return "";
 }
 
-function speechChunks(text) {
+function speechChunks(text, maxLen) {
+  const limit = Math.max(80, maxLen || 180);
   const pieces = String(text || "").split(/\n+/).flatMap((line) => line.split(/(?<=[.!?;:])\s+/));
   const chunks = [];
   let current = "";
+  const pushLong = (bit) => {
+    const parts = bit.split(/(?<=,)\s+/);
+    let piece = "";
+    const take = (value) => {
+      const clean = value.trim();
+      if (!clean) return;
+      if (clean.length <= limit) {
+        if (piece && `${piece} ${clean}`.length > limit) {
+          chunks.push(piece);
+          piece = clean;
+        } else {
+          piece = piece ? `${piece} ${clean}` : clean;
+        }
+        return;
+      }
+      if (piece) chunks.push(piece);
+      piece = "";
+      for (let i = 0; i < clean.length; i += limit) {
+        const slice = clean.slice(i, i + limit).trim();
+        if (slice) chunks.push(slice);
+      }
+    };
+    parts.forEach(take);
+    return piece;
+  };
   for (const piece of pieces) {
     const bit = piece.trim();
     if (!bit) continue;
-    if (bit.length > 1600) {
+    if (bit.length > limit) {
       if (current) chunks.push(current);
-      for (let i = 0; i < bit.length; i += 1600) chunks.push(bit.slice(i, i + 1600));
-      current = "";
+      current = pushLong(bit);
       continue;
     }
-    if (current && `${current} ${bit}`.length > 1600) {
+    if (current && `${current} ${bit}`.length > limit) {
       chunks.push(current);
       current = bit;
     } else {
@@ -2244,11 +2269,18 @@ function listenNote(message) {
 function spanishVoice() {
   const voices = window.speechSynthesis?.getVoices?.() || [];
   const prefer = ["es-PE", "es-MX", "es-419", "es-ES", "es-US", "es-AR", "es-CL", "es-CO"];
+  const spanish = voices.filter((voice) => String(voice.lang || "").toLowerCase().replace("_", "-").startsWith("es"));
+  const ranked = [];
   for (const code of prefer) {
-    const found = voices.find((voice) => voice.lang.toLowerCase().replace("_", "-") === code.toLowerCase());
-    if (found) return found;
+    spanish.forEach((voice) => {
+      const lang = String(voice.lang || "").toLowerCase().replace("_", "-");
+      if (lang === code.toLowerCase() && !ranked.includes(voice)) ranked.push(voice);
+    });
   }
-  return voices.find((voice) => voice.lang.toLowerCase().startsWith("es")) || null;
+  spanish.forEach((voice) => {
+    if (!ranked.includes(voice)) ranked.push(voice);
+  });
+  return ranked.find((voice) => voice.localService) || ranked[0] || null;
 }
 
 function stopSpeech() {
@@ -2273,12 +2305,13 @@ function startSpeech() {
     return;
   }
   const tab = document.querySelector("[data-tab][aria-selected='true']")?.dataset.tab || "";
-  const chunks = speechChunks(speechFor(tab, clase));
+  const reader = phoneReader();
+  const mobileBrowser = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  const chunks = speechChunks(speechFor(tab, clase), reader ? 380 : (mobileBrowser ? 140 : 900));
   if (!chunks.length) {
     listenNote("Esta parte no tiene texto para leer.");
     return;
   }
-  const reader = phoneReader();
   const synth = window.speechSynthesis;
   if (!reader && !synth) {
     listenNote("Este aparato no lee en voz alta.");
@@ -2302,6 +2335,39 @@ function markListening() {
   button.setAttribute("aria-pressed", "true");
 }
 
+function phoneSpeechNote(error) {
+  const message = String((error && (error.message || error)) || "");
+  if (message.includes("volumen")) return "Sube el volumen del teléfono y vuelve a tocar Escuchar.";
+  return "El teléfono no pudo leer en voz alta. En Ajustes, abre Texto a voz y descarga una voz en español.";
+}
+
+function speakWithLimit(reader, text) {
+  const budget = Math.min(90000, Math.max(8000, (text.length / Math.max(speechRate(), 0.5)) * 110 + 5000));
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { reader.stop(); } catch { /* la voz no contestó */ }
+      reject(new Error("tiempo"));
+    }, budget);
+    reader.speak({ text, rate: speechRate() }).then(
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve();
+      },
+      (error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function startPhoneSpeech(reader, chunks) {
   const token = ++speechToken;
   markListening();
@@ -2310,11 +2376,11 @@ async function startPhoneSpeech(reader, chunks) {
     if (token !== speechToken) return;
     const pace = speechPace;
     try {
-      await reader.speak({ text: chunks[index], rate: speechRate() });
-    } catch {
+      await speakWithLimit(reader, chunks[index]);
+    } catch (error) {
       if (token !== speechToken) return;
       if (pace !== speechPace) continue;
-      listenNote("El teléfono no pudo leer en voz alta. En Ajustes, abre Texto a voz y descarga una voz en español.");
+      listenNote(phoneSpeechNote(error));
       stopSpeech();
       return;
     }
@@ -2329,6 +2395,10 @@ function startBrowserSpeech(synth, chunks) {
   const token = ++speechToken;
   markListening();
   let index = 0;
+  let nudgeUntil = 0;
+  let fastFails = 0;
+  const android = /Android/i.test(navigator.userAgent || "");
+  clearInterval(speechPulse);
   const speakNext = () => {
     if (token !== speechToken) return;
     if (index >= chunks.length) {
@@ -2339,38 +2409,78 @@ function startBrowserSpeech(synth, chunks) {
     const utterance = new SpeechSynthesisUtterance(chunks[index]);
     const voice = spanishVoice();
     utterance.lang = voice?.lang || "es-ES";
-    if (voice) utterance.voice = voice;
+    // En Chrome de Android, fijar la voz corta la lectura a las pocas frases.
+    if (voice && !android) utterance.voice = voice;
     utterance.rate = speechRate();
     let settled = false;
-    const finish = (error) => {
+    const started = Date.now();
+    const seconds = utterance.text.length / (10 * Math.max(utterance.rate || 1, 0.5));
+    const watch = setTimeout(() => {
       if (settled || token !== speechToken) return;
       settled = true;
+      try { synth.cancel(); } catch { /* el navegador no avisó que terminó */ }
+      index += 1;
+      setTimeout(speakNext, 50);
+    }, Math.min(180000, Math.max(8000, seconds * 1000 + 5000)));
+    const advance = (delay) => {
+      if (settled || token !== speechToken) return;
+      settled = true;
+      clearTimeout(watch);
+      index += 1;
+      if (delay) setTimeout(speakNext, delay);
+      else speakNext();
+    };
+    const finish = (error) => {
+      if (settled || token !== speechToken) return;
       if (pace !== speechPace) {
+        settled = true;
+        clearTimeout(watch);
         speakNext();
         return;
       }
-      if (error === "interrupted" || error === "canceled") return;
+      if (error === "interrupted" || error === "canceled") {
+        if (Date.now() < nudgeUntil) return;
+        if (Date.now() - started < 400) {
+          fastFails += 1;
+          if (fastFails >= 2) {
+            settled = true;
+            clearTimeout(watch);
+            listenNote("Este aparato no pudo leer en voz alta.");
+            stopSpeech();
+            return;
+          }
+        } else {
+          fastFails = 0;
+        }
+        advance(android ? 50 : 0);
+        return;
+      }
+      fastFails = 0;
       if (error) {
+        settled = true;
+        clearTimeout(watch);
         listenNote("Este aparato no pudo leer en voz alta.");
         stopSpeech();
         return;
       }
-      index += 1;
-      speakNext();
+      advance(0);
     };
     utterance.onend = () => finish("");
-    utterance.onerror = (event) => finish(event.error || "error");
+    utterance.onerror = (event) => finish((event && event.error) || "error");
+    try { synth.resume(); } catch { /* sigue con la voz */ }
     synth.speak(utterance);
   };
-  try { synth.resume(); } catch { /* sigue con la voz */ }
   speakNext();
-  speechPulse = setInterval(() => {
-    if (token !== speechToken || !synth.speaking) return;
-    try {
-      synth.pause();
-      synth.resume();
-    } catch { /* el navegador sigue solo */ }
-  }, 10000);
+  if (!android) {
+    speechPulse = setInterval(() => {
+      if (token !== speechToken || !synth.speaking) return;
+      nudgeUntil = Date.now() + 500;
+      try {
+        synth.pause();
+        synth.resume();
+      } catch { /* el navegador sigue solo */ }
+    }, 10000);
+  }
 }
 
 function chatHtml(messages) {
