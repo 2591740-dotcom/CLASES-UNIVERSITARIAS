@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -487,6 +488,10 @@ def clip_text(text: str, limit: int) -> str:
     return text[:head] + "\n\n[...trozo del medio omitido por largo...]\n\n" + text[-tail:]
 
 
+def _fondo(value) -> str:
+    return "oscuro" if str(value or "").strip().lower() == "oscuro" else "claro"
+
+
 def _blank_settings() -> dict:
     return {
         "chat_provider": "grok",
@@ -497,6 +502,7 @@ def _blank_settings() -> dict:
         "stt_key": "",
         "stt_model": "",
         "stt_base": "",
+        "fondo": "claro",
     }
 
 
@@ -504,6 +510,7 @@ def coerce_settings(raw: dict | None) -> dict:
     data = _blank_settings()
     if not isinstance(raw, dict):
         return data
+    data["fondo"] = _fondo(raw.get("fondo"))
     legacy = "chat_provider" not in raw
     if legacy:
         key = raw.get("api_key")
@@ -558,14 +565,26 @@ def _keep_key(posted_key, old_key: str, provider_changed: bool) -> str:
     return old_key
 
 
+def _posted_text(posted: dict, field: str, current: str, limit: int) -> str:
+    if field not in posted:
+        return current
+    return str(posted.get(field) or "").replace("\r", "").replace("\n", "").strip()[:limit]
+
+
 def merge_settings(current_raw: dict | None, posted: dict) -> dict:
     current = coerce_settings(current_raw)
     if not isinstance(posted, dict):
         raise AppError("No pude leer la configuración.")
-    chat_provider = str(posted.get("chat_provider") or current["chat_provider"])
+    if "chat_provider" in posted:
+        chat_provider = str(posted.get("chat_provider") or current["chat_provider"])
+    else:
+        chat_provider = current["chat_provider"]
     if chat_provider not in PROVIDERS:
         raise AppError("Ese proveedor no está en la lista.")
-    stt_provider = str(posted.get("stt_provider") or "same")
+    if "stt_provider" in posted:
+        stt_provider = str(posted.get("stt_provider") or "same")
+    else:
+        stt_provider = current["stt_provider"]
     if stt_provider != "same":
         if stt_provider not in PROVIDERS or PROVIDERS[stt_provider].get("stt") is None:
             label = PROVIDERS.get(stt_provider, {}).get("label") or "Ese proveedor"
@@ -573,12 +592,13 @@ def merge_settings(current_raw: dict | None, posted: dict) -> dict:
     return {
         "chat_provider": chat_provider,
         "chat_key": _keep_key(posted.get("chat_key"), current["chat_key"], chat_provider != current["chat_provider"]),
-        "chat_model": str(posted.get("chat_model") or "").replace("\r", "").replace("\n", "").strip()[:120],
-        "chat_base": _clean_base(posted.get("chat_base")),
+        "chat_model": _posted_text(posted, "chat_model", current["chat_model"], 120),
+        "chat_base": _clean_base(posted.get("chat_base")) if "chat_base" in posted else current["chat_base"],
         "stt_provider": stt_provider,
         "stt_key": _keep_key(posted.get("stt_key"), current["stt_key"], stt_provider != current["stt_provider"]),
-        "stt_model": str(posted.get("stt_model") or "").replace("\r", "").replace("\n", "").strip()[:120],
-        "stt_base": _clean_base(posted.get("stt_base")),
+        "stt_model": _posted_text(posted, "stt_model", current["stt_model"], 120),
+        "stt_base": _clean_base(posted.get("stt_base")) if "stt_base" in posted else current["stt_base"],
+        "fondo": _fondo(posted.get("fondo")) if "fondo" in posted else current["fondo"],
     }
 
 
@@ -732,6 +752,7 @@ def public_config(raw: dict | None) -> dict:
             "from_env": cfg.stt_from_env,
         },
         "providers": provider_catalog(),
+        "fondo": data["fondo"],
     }
 
 
@@ -1336,9 +1357,13 @@ def study_schema() -> dict:
             "titulo": {"type": "string"},
             "texto": {"type": "string"},
             "ejemplo": {"type": "string"},
+            "tiempo": {
+                "type": "string",
+                "description": "Minuto en que empieza este tema, MM:SS o H:MM:SS. Vacío si no se ubica",
+            },
             "videos": {"type": "array", "items": video},
         },
-        ["titulo", "texto", "ejemplo", "videos"],
+        ["titulo", "texto", "ejemplo", "tiempo", "videos"],
     )
     branch = _object_schema(
         {
@@ -1361,6 +1386,13 @@ def study_schema() -> dict:
     term = _object_schema(
         {"termino": {"type": "string"}, "definicion": {"type": "string"}},
         ["termino", "definicion"],
+    )
+    wiki = _object_schema(
+        {
+            "frase": {"type": "string", "description": "Texto exacto, como aparece en la explicación"},
+            "articulo": {"type": "string", "description": "Título del artículo de Wikipedia, sin la dirección"},
+        },
+        ["frase", "articulo"],
     )
     quiz = _object_schema(
         {"pregunta": {"type": "string"}, "respuesta": {"type": "string"}},
@@ -1398,7 +1430,9 @@ def study_schema() -> dict:
     )
     return _object_schema(
         {
-            "titulo": {"type": "string", "description": "Título corto de la clase"},
+            "titulo": {"type": "string", "description": "Tema de la sesión, sin la materia ni el número"},
+            "materia": {"type": "string", "description": "Nombre corto del curso. Vacío si no se entiende"},
+            "sesion": {"type": "string", "description": "Número de sesión si se dijo, solo el número. Vacío si no se dijo"},
             "idea": {"type": "string", "description": "La idea central en una oración"},
             "dificil": {"type": "string", "description": "La parte más difícil, explicada con palabras simples"},
             "resumen": {"type": "string"},
@@ -1410,10 +1444,11 @@ def study_schema() -> dict:
             "capturas": {"type": "array", "items": shot},
             "avisos": {"type": "array", "items": aviso},
             "links": {"type": "array", "items": link},
+            "wiki": {"type": "array", "items": wiki},
         },
         [
-            "titulo", "idea", "dificil", "resumen", "explicacion",
-            "esquema", "puntos", "terminos", "repaso", "capturas", "avisos", "links",
+            "titulo", "materia", "sesion", "idea", "dificil", "resumen", "explicacion",
+            "esquema", "puntos", "terminos", "repaso", "capturas", "avisos", "links", "wiki",
         ],
     )
 
@@ -1630,6 +1665,14 @@ def _clock_seconds(stamp: str) -> float:
     return 0
 
 
+_CLOCK = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+
+
+def _clean_clock(value) -> str:
+    text = _as_text(value)
+    return text if _CLOCK.fullmatch(text) else ""
+
+
 def place_youtube(study: dict, lines: list[dict] | None) -> dict:
     sections = study.get("explicacion") or []
     if not sections:
@@ -1772,11 +1815,404 @@ def collect_links(study: dict, lines: list | None) -> list[dict]:
     return found
 
 
+def _fold(text: str) -> str:
+    folded = unicodedata.normalize("NFD", str(text or "").casefold())
+    return "".join(char for char in folded if unicodedata.category(char) != "Mn")
+
+
+_TOPIC_STOP = frozenset(
+    "para como esta este esto estas estos desde entre sobre tambien tiene tienen "
+    "puede pueden clase tema parte ejemplo cuando donde porque pero cada todo toda "
+    "todos todas hacia durante mediante segun cual cuales estan sido video minuto "
+    "explicacion explica explicar aquella aquellos aquella bajo tras contra hasta".split()
+)
+
+
+def _content_words(text: str) -> set[str]:
+    folded = _fold(text)
+    return {
+        word for word in re.findall(r"[a-z0-9]{4,}", folded)
+        if word not in _TOPIC_STOP
+    }
+
+
+def _word_hit(word: str, other: set[str]) -> bool:
+    if word in other:
+        return True
+    if len(word) < 5:
+        return False
+    return any(len(item) >= 5 and (word.startswith(item) or item.startswith(word)) for item in other)
+
+
+def _overlap(left: set[str], right: set[str]) -> int:
+    return sum(1 for word in left if _word_hit(word, right))
+
+
+def _topic_score(part: dict, anchor_words: set[str]) -> int:
+    return _overlap(_content_words(part.get("titulo") or ""), anchor_words)
+
+
+def _best_topic_time(part: dict, anchors: list[dict]) -> str:
+    best_score = 0
+    best_seconds = -1.0
+    best_time = ""
+    for anchor in anchors:
+        score = _topic_score(part, anchor["words"])
+        if score < 1:
+            continue
+        if score > best_score or (score == best_score and anchor["seconds"] >= best_seconds):
+            best_score = score
+            best_seconds = anchor["seconds"]
+            best_time = anchor["tiempo"]
+    return best_time
+
+
+def _blocked_seconds(lines: list | None) -> list[float]:
+    """A one-line transcript is stamped at the end of the file, not at a topic."""
+    rows = [line for line in (lines or []) if isinstance(line, dict)]
+    if len(rows) != 1:
+        return []
+    line = rows[0]
+    when = _clean_clock(line.get("stamp"))
+    seconds = float(line.get("time") or 0) or _clock_seconds(when)
+    if seconds <= 1:
+        return []
+    return [seconds]
+
+
+def stamp_topics(study: dict, frames: list | None = None, lines: list | None = None) -> bool:
+    """Fill an empty explicación tiempo from the summary point or slide of that topic."""
+    parts = [part for part in (study.get("explicacion") or []) if isinstance(part, dict)]
+    before = [_clean_clock(part.get("tiempo")) for part in parts]
+    for part, cleaned in zip(parts, before):
+        part["tiempo"] = cleaned
+    anchors = []
+    for point in study.get("puntos") or []:
+        if not isinstance(point, dict):
+            continue
+        when = _clean_clock(point.get("tiempo"))
+        text = _as_text(point.get("texto"))
+        if when and text:
+            anchors.append({
+                "tiempo": when,
+                "seconds": _clock_seconds(when),
+                "words": _content_words(text),
+            })
+    for shot in study.get("capturas") or []:
+        if not isinstance(shot, dict) or not frames:
+            continue
+        try:
+            index = int(shot.get("indice"))
+        except (TypeError, ValueError):
+            continue
+        if index < 1 or index > len(frames):
+            continue
+        frame = frames[index - 1]
+        if not isinstance(frame, dict):
+            continue
+        text = _as_text(shot.get("que_muestra"))
+        if not text:
+            continue
+        when = fmt_time(float(frame.get("time") or 0))
+        anchors.append({
+            "tiempo": when,
+            "seconds": float(frame.get("time") or 0),
+            "words": _content_words(text),
+        })
+    blocked = _blocked_seconds(lines)
+    anchors = [
+        anchor for anchor in anchors
+        if not any(abs(anchor["seconds"] - mark) <= 2 for mark in blocked)
+    ]
+    anchors.sort(key=lambda item: (item["seconds"], item["tiempo"]))
+    for part in parts:
+        if part.get("tiempo"):
+            continue
+        when = _best_topic_time(part, anchors)
+        if when:
+            part["tiempo"] = when
+    after = [part.get("tiempo") or "" for part in parts]
+    return before != after
+
+
+def _fold_map(text: str) -> tuple[str, list[int]]:
+    folded: list[str] = []
+    origins: list[int] = []
+    for index, char in enumerate(str(text or "")):
+        pieces = [piece for piece in unicodedata.normalize("NFD", char.casefold()) if unicodedata.category(piece) != "Mn"]
+        for piece in pieces:
+            folded.append(piece)
+            origins.append(index)
+    return "".join(folded), origins
+
+
+def _locate_phrase(corpus: str, phrase: str) -> str:
+    cleaned = " ".join(_as_text(phrase).split())
+    if len(cleaned) < 3 or not corpus:
+        return ""
+    direct = re.compile(r"(?<!\w)" + re.escape(cleaned) + r"(?!\w)", re.IGNORECASE)
+    match = direct.search(corpus)
+    if match:
+        return match.group(0)
+    folded, origins = _fold_map(corpus)
+    needle = _fold(cleaned)
+    if len(needle) < 3:
+        return ""
+    found = re.compile(r"(?<!\w)" + re.escape(needle) + r"(?!\w)").search(folded)
+    if not found or not origins:
+        return ""
+    start = origins[found.start()]
+    end = origins[found.end() - 1] + 1
+    return corpus[start:end]
+
+
+def course_label(materia: str, sesion: str) -> str:
+    subject = " ".join(_as_text(materia).split())[:80]
+    raw = " ".join(_as_text(sesion).split())[:24]
+    if len(raw.split()) > 3:
+        raw = ""
+    number = re.sub(r"(?i)^(?:sesi[oó]n|clase|semana)\s*", "", raw).strip(" .#º°")
+    if re.fullmatch(r"\d{1,3}[a-zA-Z]?", number):
+        label = f"Sesión {number}"
+    elif raw:
+        label = raw if re.match(r"(?i)sesi[oó]n\b", raw) else f"Sesión {raw}"
+    else:
+        label = ""
+    if label and subject and label.casefold() in subject.casefold():
+        return subject[:120]
+    if subject and label:
+        return f"{subject} · {label}"[:120]
+    return (subject or label)[:120]
+
+
+def apply_course(meta: dict, study: dict) -> str:
+    current = " ".join(_as_text(meta.get("materia") if isinstance(meta, dict) else "").split())[:120]
+    if isinstance(meta, dict) and meta.get("materia_custom"):
+        return current
+    found = course_label(
+        study.get("materia") if isinstance(study, dict) else "",
+        study.get("sesion") if isinstance(study, dict) else "",
+    )
+    return found or current
+
+
+_WIKI_SKIP = {
+    "clase", "sesion", "tema", "ejemplo", "profesor", "alumna", "alumno",
+    "tarea", "examen", "video", "diapositiva", "curso", "materia", "parte",
+}
+
+
+class _WikiDown(Exception):
+    pass
+
+
+def _wiki_key(text: str) -> str:
+    return " ".join(_fold(text).replace("_", " ").split())
+
+
+def _wiki_is_ambiguous(title: str) -> bool:
+    return bool(re.search(r"(?i)\((?:desambiguaci[oó]n|disambiguation)\)$", title.strip()))
+
+
+def _wiki_related(left: str, right: str) -> bool:
+    words = re.compile(r"[a-z0-9]{3,}")
+    return bool(set(words.findall(_fold(left))) & set(words.findall(_fold(right))))
+
+
+def _wiki_titles(payload: dict, requested: list[str]) -> dict[str, str]:
+    query = payload.get("query") if isinstance(payload, dict) else None
+    if not isinstance(query, dict):
+        return {}
+    hops: dict[str, str] = {}
+    for key in ("normalized", "redirects"):
+        for item in query.get(key) or []:
+            if isinstance(item, dict) and item.get("from") and item.get("to"):
+                hops[_wiki_key(item["from"])] = str(item["to"])
+    pages: dict[str, str] = {}
+    for page in (query.get("pages") or {}).values():
+        if not isinstance(page, dict) or "missing" in page or "invalid" in page:
+            continue
+        title = _as_text(page.get("title"))
+        if title and page.get("ns", 0) == 0 and not _wiki_is_ambiguous(title):
+            pages[_wiki_key(title)] = title
+    found: dict[str, str] = {}
+    for original in requested:
+        seen: set[str] = set()
+        current = original
+        title = ""
+        while current and _wiki_key(current) not in seen:
+            seen.add(_wiki_key(current))
+            key = _wiki_key(current)
+            if key in pages:
+                title = pages[key]
+                break
+            current = hops.get(key) or ""
+        if title:
+            found[original] = title
+    return found
+
+
+def _wiki_search_title(payload: dict) -> str:
+    query = payload.get("query") if isinstance(payload, dict) else None
+    hits = query.get("search") if isinstance(query, dict) else None
+    if not hits or not isinstance(hits[0], dict):
+        return ""
+    title = _as_text(hits[0].get("title"))
+    if not title or _wiki_is_ambiguous(title):
+        return ""
+    return title
+
+
+def _wiki_article_url(lang: str, title: str) -> str:
+    if lang not in {"es", "en"}:
+        return ""
+    cleaned = " ".join(_as_text(title).split())
+    if not cleaned or _wiki_is_ambiguous(cleaned):
+        return ""
+    slug = urllib.parse.quote(cleaned.replace(" ", "_"), safe="()_/'")
+    return f"https://{lang}.wikipedia.org/wiki/{slug}"
+
+
+def _wiki_search_url(phrase: str) -> str:
+    return "https://es.wikipedia.org/w/index.php?" + urllib.parse.urlencode({"search": phrase})
+
+
+def _wiki_api(lang: str, params: dict) -> dict:
+    if lang not in {"es", "en"}:
+        raise _WikiDown()
+    query = urllib.parse.urlencode({"action": "query", "format": "json", "utf8": "1", **params})
+    request = urllib.request.Request(
+        f"https://{lang}.wikipedia.org/w/api.php?{query}",
+        headers={
+            "User-Agent": "ClaseClara/1.0 (local study app; educational)",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError):
+        raise _WikiDown()
+    if not isinstance(data, dict):
+        raise _WikiDown()
+    return data
+
+
+def _wiki_find_article(articulo: str, frase: str, api=None) -> tuple[str, str]:
+    call = api or _wiki_api
+    candidates = []
+    for text in (articulo, frase):
+        cleaned = " ".join(_as_text(text).split())
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned[:140])
+    if not candidates:
+        return "", ""
+    for lang in ("es", "en"):
+        try:
+            found = _wiki_titles(call(lang, {"redirects": "1", "titles": "|".join(candidates)}), candidates)
+        except _WikiDown:
+            raise
+        for candidate in candidates:
+            title = found.get(candidate) or ""
+            if title:
+                return lang, title
+        queries = []
+        for text in (frase, articulo):
+            cleaned = " ".join(_as_text(text).split())
+            if cleaned and cleaned not in queries:
+                queries.append(cleaned[:140])
+        for query in queries:
+            try:
+                title = _wiki_search_title(call(lang, {
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": "1",
+                    "srnamespace": "0",
+                }))
+            except _WikiDown:
+                raise
+            if title and _wiki_related(query, title):
+                return lang, title
+    return "", ""
+
+
+def _prepare_wiki(items: list, corpus: str) -> list[dict]:
+    located = []
+    seen = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        phrase = _as_text(item.get("frase"))
+        article = _as_text(item.get("articulo"))
+        exact = _locate_phrase(corpus, phrase) or _locate_phrase(corpus, article)
+        if not exact:
+            continue
+        key = _wiki_key(exact)
+        if not key or key in _WIKI_SKIP or key in seen:
+            continue
+        seen.add(key)
+        located.append({"frase": exact[:120], "articulo": (article or exact)[:140]})
+        if len(located) >= 8:
+            break
+    return located
+
+
+def resolve_wiki(items: list, corpus: str, find_article=None) -> list[dict]:
+    located = _prepare_wiki(items, corpus)
+    if not located:
+        return []
+    down = False
+
+    def finder(articulo: str, frase: str) -> tuple[str, str]:
+        nonlocal down
+        if find_article is not None:
+            return find_article(articulo, frase)
+        if down:
+            return "", ""
+        try:
+            return _wiki_find_article(articulo, frase)
+        except _WikiDown:
+            down = True
+            return "", ""
+
+    resolved = []
+    cache: dict[tuple[str, str], tuple[str, str]] = {}
+    for item in located:
+        key = (_wiki_key(item["articulo"]), _wiki_key(item["frase"]))
+        if key not in cache:
+            try:
+                cache[key] = finder(item["articulo"], item["frase"])
+            except Exception:
+                cache[key] = ("", "")
+        lang, title = cache[key]
+        url = _wiki_article_url(lang, title)
+        label = title or item["articulo"] or item["frase"]
+        if not url:
+            url = _wiki_search_url(item["frase"])
+        resolved.append({"frase": item["frase"], "articulo": label[:140], "url": url})
+    return resolved
+
+
+def _explanation_corpus(study: dict) -> str:
+    parts = [_as_text(study.get("dificil"))]
+    for part in study.get("explicacion") or []:
+        if not isinstance(part, dict):
+            continue
+        parts.extend([
+            _as_text(part.get("titulo")),
+            _as_text(part.get("texto")),
+            _as_text(part.get("ejemplo")),
+        ])
+    return "\n".join(part for part in parts if part)
+
+
 def normalize_study(data: dict, corpus: str = "") -> dict:
     if tree_has_broken(data):
         data = repair_tree(data, corpus)
     study = {
         "titulo": _as_text(data.get("titulo")) or "Clase",
+        "materia": _as_text(data.get("materia"))[:80],
+        "sesion": _as_text(data.get("sesion"))[:24],
         "idea": _as_text(data.get("idea")),
         "dificil": _as_text(data.get("dificil")),
         "resumen": _as_text(data.get("resumen")),
@@ -1788,6 +2224,7 @@ def normalize_study(data: dict, corpus: str = "") -> dict:
         "capturas": [],
         "avisos": [],
         "links": [],
+        "wiki": [],
     }
     for item in data.get("explicacion") or []:
         if not isinstance(item, dict):
@@ -1814,6 +2251,7 @@ def normalize_study(data: dict, corpus: str = "") -> dict:
             "titulo": _as_text(item.get("titulo")) or "Idea",
             "texto": text,
             "ejemplo": _as_text(item.get("ejemplo")),
+            "tiempo": _clean_clock(item.get("tiempo")),
             "videos": videos,
         })
     for item in data.get("esquema") or []:
@@ -1899,6 +2337,18 @@ def normalize_study(data: dict, corpus: str = "") -> dict:
             "titulo": label[:140],
             "tiempo": when,
         })
+    for item in data.get("wiki") or []:
+        if not isinstance(item, dict):
+            continue
+        frase = _as_text(item.get("frase"))
+        if not frase:
+            continue
+        study["wiki"].append({
+            "frase": frase[:120],
+            "articulo": _as_text(item.get("articulo"))[:140],
+        })
+        if len(study["wiki"]) >= 8:
+            break
     if not study["explicacion"] and not study["resumen"]:
         raise AppError("El modelo no devolvió la explicación. Pulsa Reintentar.")
     return study
@@ -1949,12 +2399,15 @@ Transcripción:
 {transcript}
 
 Cómo escribir:
-- El titulo es el tema de esta sesión, corto, como en el cuaderno. Si hay materia, escríbelo "Materia: tema", por ejemplo "Psicología: bases biológicas del lenguaje". Si no indicaron la materia pero el curso se entiende, usa ese curso. No uses el nombre del archivo.
+- El titulo es solo el tema de esta sesión, corto, como en el cuaderno. Ejemplo: "Bases biológicas del lenguaje". No pongas ahí la materia ni el número de sesión. No uses el nombre del archivo.
+- materia es el nombre del curso, corto, como "Psicología" o "Biología celular". Sácalo de lo que se dice o de una diapositiva. Si arriba ya viene una materia y coincide, consérvala. Si no se entiende, va vacía. No inventes el curso.
+- sesion es el número de esta clase solo si alguien lo dijo, por ejemplo "sesión 4" o "clase 7". Escribe solo el número, como "4". Si no se dijo un número, va vacía. No inventes un número.
 - Enseña. En cada parte di la idea, después cómo funciona, y cierra con un ejemplo de la clase o una analogía corta.
 - La explicación difícil tiene que dejar clara la parte que más cuesta, sin adornos.
 - El resumen cuenta qué quedó explicado, no solo de qué se habló.
 - El esquema es un mapa corto para repasar. Cada rama se entiende sola.
 - Los tiempos salen de la transcripción, en MM:SS o H:MM:SS.
+- Cada parte de explicacion lleva tiempo: el minuto en que empieza ese tema. Es el marcador para saltar el video a esa explicación. Tiene que coincidir con la transcripción o con la captura de ese momento. Si no se puede ubicar, va vacío. No inventes un minuto.
 - Si una captura es solo la cara, el chat de Zoom o una pantalla quieta, no la trates como contenido.
 - El índice de cada captura empieza en 1. Si no hay capturas, la lista va vacía.
 - No inventes fórmulas, fechas ni ejemplos que la clase no haya dicho.
@@ -1966,8 +2419,9 @@ Cómo escribir:
 - captura es el número de la captura donde se ve el encargo, o 0 si no se ve.
 - enlace solo si se dijo o se mostró una dirección web. Si no, va vacío.
 - tiempo es el momento de la transcripción en que se encarga, en MM:SS o H:MM:SS.
+- wiki: pocas expresiones de la explicación que, al abrirlas en Wikipedia, ayuden a entender mejor o a ver una imagen. Sirve una estructura, un esquema con nombre, una teoría o un autor con su idea. Por ejemplo, si la explicación dice "homúnculo de Penfield", frase es "homúnculo de Penfield" y articulo es "Homúnculo cortical". frase es el texto exacto, tal como aparece en la explicación, y puede tener varias palabras. articulo es el título del artículo en español. Si solo existe en inglés, el título en inglés. No escribas la dirección. No marques palabras comunes ni lo que ya quedó claro con una frase. Si no hay nada que valga la pena, wiki va vacío. Como mucho 8.
 
-Devuelve un solo objeto JSON con las claves titulo, idea, dificil, resumen, explicacion, esquema, puntos, terminos, repaso, capturas y avisos. Sin texto fuera del JSON.
+Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dificil, resumen, explicacion, esquema, puntos, terminos, repaso, capturas, avisos, links y wiki. Sin texto fuera del JSON.
 """
     content.append({"type": "input_text", "text": prompt})
     messages = [
@@ -1985,11 +2439,18 @@ Devuelve un solo objeto JSON con las claves titulo, idea, dificil, resumen, expl
         if "respondió 400" not in str(exc):
             raise
         raw = ask(None)
+
+    def finish(text: str) -> dict:
+        study = place_youtube(normalize_study(parse_json_text(text), spoken), lines)
+        study["wiki"] = resolve_wiki(study.get("wiki") or [], _explanation_corpus(study))
+        stamp_topics(study, frames, lines)
+        return study
+
     try:
-        return place_youtube(normalize_study(parse_json_text(raw), spoken), lines)
+        return finish(raw)
     except (AppError, json.JSONDecodeError):
         raw = ask(study_schema() if use_schema else None)
-        return place_youtube(normalize_study(parse_json_text(raw), spoken), lines)
+        return finish(raw)
 
 
 CHAT_SYSTEM = (
@@ -2076,6 +2537,42 @@ def self_test() -> None:
         }],
     })
     assert packed["explicacion"][0]["ejemplo"] == "La hoja verde."
+    assert packed["explicacion"][0]["tiempo"] == ""
+    kept = normalize_study({
+        "titulo": "Clase",
+        "resumen": "Se explicó el tema.",
+        "explicacion": [{"titulo": "Luz", "texto": "La clorofila absorbe luz.", "ejemplo": "", "tiempo": "1:05"}],
+    })
+    assert kept["explicacion"][0]["tiempo"] == "1:05"
+    assert normalize_study({
+        "titulo": "Clase",
+        "resumen": "Se explicó el tema.",
+        "explicacion": [{"titulo": "Luz", "texto": "La clorofila absorbe luz.", "ejemplo": "", "tiempo": "luego"}],
+    })["explicacion"][0]["tiempo"] == ""
+    marked = {
+        "explicacion": [
+            {"titulo": "Homúnculo de Penfield", "texto": "La corteza representa el cuerpo.", "ejemplo": "", "tiempo": ""},
+            {"titulo": "Apraxia", "texto": "No puede realizar el gesto pedido.", "ejemplo": "", "tiempo": ""},
+            {"titulo": "Cierre", "texto": "Se resume la sesión.", "ejemplo": "", "tiempo": "4:00"},
+        ],
+        "puntos": [
+            {"tiempo": "9:17", "texto": "Diferencia entre movimiento y praxia"},
+            {"tiempo": "17:38", "texto": "Homúnculo Penfield motor en la corteza"},
+            {"tiempo": "17:40", "texto": "Definición formal de apraxia"},
+        ],
+        "capturas": [{"indice": 1, "que_muestra": "Homúnculo de Penfield", "por_que_importa": "Mapa motor"}],
+    }
+    assert stamp_topics(marked, [{"time": 1058, "file": "01.jpg"}])
+    assert marked["explicacion"][0]["tiempo"] == "17:38"
+    assert marked["explicacion"][1]["tiempo"] == "17:40"
+    assert marked["explicacion"][2]["tiempo"] == "4:00"
+    assert stamp_topics(marked, [{"time": 1058, "file": "01.jpg"}]) is False
+    lone = {
+        "explicacion": [{"titulo": "Relación con la conducta", "texto": "Se conecta.", "ejemplo": "", "tiempo": ""}],
+        "puntos": [{"tiempo": "1:12:00", "texto": "Relación con la conducta al inicio"}],
+    }
+    assert stamp_topics(lone, None, [{"time": 4319.9, "stamp": "1:12:00", "text": "clase"}]) is False
+    assert lone["explicacion"][0]["tiempo"] == ""
     assert youtube_url("https://youtu.be/dQw4w9WgXcQ?t=30") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30"
     assert youtube_url("javascript:alert(1)") == ""
     placed = place_youtube(normalize_study({
@@ -2124,6 +2621,66 @@ def self_test() -> None:
     assert urls[0] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert "https://ejemplo.invalid/apuntes" in urls
     assert all("javascript" not in item for item in urls)
+    assert course_label("Psicología", "4") == "Psicología · Sesión 4"
+    assert course_label("Psicología · Sesión 4", "4") == "Psicología · Sesión 4"
+    assert course_label("", "12") == "Sesión 12"
+    assert course_label("Biología celular", "") == "Biología celular"
+    assert course_label("Neuro", "sesión 3") == "Neuro · Sesión 3"
+    assert apply_course({"materia": "Hecha a mano", "materia_custom": True}, {"materia": "Otra", "sesion": "9"}) == "Hecha a mano"
+    assert apply_course({"materia": ""}, {"materia": "Psicología", "sesion": "4"}) == "Psicología · Sesión 4"
+    named = normalize_study({
+        "titulo": "Bases biológicas del lenguaje",
+        "materia": "Psicología",
+        "sesion": "4",
+        "resumen": "Se explicó el homúnculo.",
+        "explicacion": [{
+            "titulo": "La corteza",
+            "texto": "El homúnculo de Penfield dibuja el cuerpo sobre la corteza.",
+            "ejemplo": "La mano ocupa mucho en el homúnculo de Penfield.",
+        }],
+        "wiki": [
+            {"frase": "homúnculo de Penfield", "articulo": "Homúnculo cortical"},
+            {"frase": "javascript:alert(1)", "articulo": "https://evil.example"},
+            {"frase": "clase", "articulo": "Clase"},
+        ],
+    })
+    assert named["materia"] == "Psicología"
+    assert named["sesion"] == "4"
+    assert named["wiki"][0]["frase"] == "homúnculo de Penfield"
+    assert "url" not in named["wiki"][0]
+    linked = resolve_wiki(named["wiki"], _explanation_corpus(named), find_article=lambda articulo, frase: ("es", "Homúnculo cortical") if "penfield" in frase.casefold() or "hom" in _fold(articulo) else ("", ""))
+    assert linked[0]["frase"] == "homúnculo de Penfield"
+    assert linked[0]["url"] == "https://es.wikipedia.org/wiki/Hom%C3%BAnculo_cortical"
+    assert linked[0]["articulo"] == "Homúnculo cortical"
+    assert len(linked) == 1
+    missed = resolve_wiki(
+        [{"frase": "cosa rara", "articulo": "Cosa rara"}],
+        "Se nombró cosa rara.",
+        find_article=lambda articulo, frase: ("", ""),
+    )
+    assert missed[0]["url"].startswith("https://es.wikipedia.org/w/index.php?")
+    assert "cosa+rara" in missed[0]["url"] or "cosa%20rara" in missed[0]["url"]
+    assert resolve_wiki([{"frase": "ATP", "articulo": "ATP"}], "No está el término.", find_article=lambda articulo, frase: ("es", "ATP")) == []
+    folded = resolve_wiki(
+        [{"frase": "homunculo de Penfield", "articulo": "Homúnculo cortical"}],
+        "El homúnculo de Penfield se dibuja en la corteza.",
+        find_article=lambda articulo, frase: ("es", "Homúnculo cortical"),
+    )
+    assert folded[0]["frase"] == "homúnculo de Penfield"
+    pages = _wiki_titles({
+        "query": {
+            "normalized": [{"from": "homunculo de Penfield", "to": "Homunculo de Penfield"}],
+            "redirects": [{"from": "Homunculo de Penfield", "to": "Homúnculo cortical"}],
+            "pages": {
+                "10": {"pageid": 10, "ns": 0, "title": "Homúnculo cortical"},
+                "-1": {"ns": 0, "title": "No existe", "missing": ""},
+            },
+        }
+    }, ["homunculo de Penfield", "No existe"])
+    assert pages["homunculo de Penfield"] == "Homúnculo cortical"
+    assert "No existe" not in pages
+    assert _wiki_article_url("es", "Homúnculo cortical (desambiguación)") == ""
+    assert _wiki_article_url("fr", "Homúnculo cortical") == ""
 
     migrated = coerce_settings({"api_key": "secret-grok"})
     assert migrated["chat_provider"] == "grok"
@@ -2176,6 +2733,17 @@ def self_test() -> None:
     })
     assert both["ready"] is True
     assert "sk-ant-test" not in json.dumps(both)
+    assert coerce_settings({"api_key": "secret-grok"})["fondo"] == "claro"
+    assert coerce_settings({"chat_provider": "grok", "fondo": "oscuro"})["fondo"] == "oscuro"
+    assert coerce_settings({"chat_provider": "grok", "fondo": "azul"})["fondo"] == "claro"
+    painted = merge_settings({"chat_provider": "grok", "chat_key": "sk-keep", "chat_model": "grok-4.7", "stt_provider": "groq", "stt_key": "gsk-keep"}, {"fondo": "oscuro"})
+    assert painted["fondo"] == "oscuro"
+    assert painted["chat_key"] == "sk-keep"
+    assert painted["chat_model"] == "grok-4.7"
+    assert painted["stt_provider"] == "groq"
+    assert painted["stt_key"] == "gsk-keep"
+    assert merge_settings(painted, {"chat_provider": "grok", "chat_key": "", "stt_provider": "same"})["fondo"] == "oscuro"
+    assert public_config({"chat_provider": "openai", "chat_key": "sk-secret-value", "stt_provider": "same", "fondo": "oscuro"})["fondo"] == "oscuro"
     env_key = os.environ.get("XAI_API_KEY", "")
     if env_key:
         assert env_key not in blob

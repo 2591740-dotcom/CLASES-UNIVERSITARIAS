@@ -47,17 +47,21 @@ En el sitio, Environment variables:
 La contraseña no va en Git. Está en static\cloud-config.js
 de esta PC, en el campo password. En la web se escribe al entrar.
 
-En el teléfono, la app es ClaseClara.apk, en esta misma carpeta.
-El texto y las diapositivas se leen desde Supabase. Pega un
-enlace de Zoom (zoom.us/rec/play/) o carga un video del teléfono.
-El enlace lo prepara esta PC cuando iniciar.bat está abierto.
-El video no se sube a Supabase. No compartas el APK: abre tus clases.
+La página hace lo mismo que el APK. En la computadora, en Android
+o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas
+el video de ese aparato. Lo ves ahí mismo, escuchas la pestaña y
+usas el chat. La explicación, las diapositivas y el video para los
+demás aparatos los prepara esta PC cuando iniciar.bat está abierto.
+El archivo no se queda guardado en Supabase.
+
+El APK sigue en ClaseClara.apk, en esta misma carpeta.
+No lo compartas: abre tus clases.
 
 Escuchar lee en voz alta la pestaña que estás viendo:
 explicación, resumen, esquema, glosario, repaso, avisos,
 capturas o transcripción. Detener la corta. Si das play al
-video o cambias de pestaña, también se detiene. Usa una voz
-en español de Windows y no gasta la clave del proveedor.
+video o cambias de pestaña, también se detiene. Usa la voz en
+español del navegador o del teléfono, y no gasta la clave.
 
 El costo depende del proveedor. Con Grok, la transcripción
 cuesta unos 0,10 USD por hora de audio y la explicación es

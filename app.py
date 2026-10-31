@@ -19,6 +19,7 @@ from pathlib import Path
 
 import cloud
 import engine
+import youtube_up
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -27,9 +28,12 @@ CLASSES = DATA / "classes"
 SETTINGS = DATA / "settings.json"
 
 META_LOCK = threading.Lock()
+SETTINGS_LOCK = threading.Lock()
 CHAT_LOCKS: dict[str, threading.Lock] = {}
 CANCELLED: set[str] = set()
 ACTIVE: set[str] = set()
+YOUTUBE_UPLOADS: set[str] = set()
+YOUTUBE_LOCK = threading.Lock()
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
 
@@ -202,18 +206,27 @@ def update_meta(class_id: str, **changes) -> dict:
         meta = read_meta(class_id)
         meta.update(changes)
         write_meta(class_id, meta)
-        return meta
+        snapshot = dict(meta)
+    if {"stage", "detail", "status", "error"} & set(changes):
+        try:
+            cloud.note(class_id, snapshot)
+        except Exception:
+            traceback.print_exc()
+    return snapshot
+
+
+def _read_settings_file() -> dict:
+    if not SETTINGS.is_file():
+        return {}
+    try:
+        loaded = json.loads(SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def read_settings() -> dict:
-    raw: dict = {}
-    if SETTINGS.is_file():
-        try:
-            loaded = json.loads(SETTINGS.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            raw = loaded
+    raw = _read_settings_file()
     data = engine.coerce_settings(raw)
     legacy = "chat_provider" not in raw and isinstance(raw.get("api_key"), str) and raw.get("api_key").strip()
     if legacy:
@@ -226,17 +239,71 @@ def write_settings(data: dict) -> None:
     SETTINGS.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _sync_settings_locked() -> dict:
+    """Keep the newer shared key. A failed read does not overwrite the other device."""
+    raw = _read_settings_file()
+    local = engine.coerce_settings(raw)
+    stamp = cloud.ia_stamp(raw)
+    remote = None
+    remote_known = False
+    if cloud.configured():
+        try:
+            remote = cloud.fetch_ia()
+            remote_known = True
+        except Exception:
+            traceback.print_exc()
+    if remote_known and cloud.prefer_remote(stamp, remote):
+        chosen = engine.coerce_settings(remote)
+        chosen["actualizado"] = cloud.ia_stamp(remote)
+        if stamp != chosen["actualizado"] or local != engine.coerce_settings(chosen):
+            write_settings(chosen)
+        return engine.coerce_settings(chosen)
+    if not remote_known or (not local.get("chat_key") and not local.get("stt_key")):
+        return local
+    if not stamp:
+        stamp = int(datetime.now().timestamp())
+    stored = dict(local)
+    stored["actualizado"] = stamp
+    if cloud.ia_stamp(raw) != stamp:
+        write_settings(stored)
+    remote_same = (
+        isinstance(remote, dict)
+        and cloud.ia_stamp(remote) == stamp
+        and engine.coerce_settings(remote) == local
+    )
+    if not remote_same:
+        try:
+            cloud.push_ia(stored)
+        except Exception:
+            traceback.print_exc()
+    return local
+
+
+def sync_settings() -> dict:
+    with SETTINGS_LOCK:
+        return _sync_settings_locked()
+
+
 def status_payload() -> dict:
-    payload = engine.public_config(read_settings())
+    payload = engine.public_config(sync_settings())
     payload["ffmpeg"] = shutil.which("ffmpeg") is not None
+    payload["youtube"] = youtube_up.public_status()
     return payload
 
 
 def store_settings(posted: dict) -> dict:
-    merged = engine.merge_settings(read_settings(), posted)
-    write_settings(merged)
-    payload = engine.public_config(merged)
+    with SETTINGS_LOCK:
+        current = _sync_settings_locked()
+        merged = engine.merge_settings(current, posted)
+        merged["actualizado"] = int(datetime.now().timestamp())
+        write_settings(merged)
+        try:
+            cloud.push_ia(merged)
+        except Exception:
+            traceback.print_exc()
+        payload = engine.public_config(merged)
     payload["ffmpeg"] = shutil.which("ffmpeg") is not None
+    payload["youtube"] = youtube_up.public_status()
     return payload
 
 
@@ -276,6 +343,18 @@ def recover_interrupted() -> None:
 
 
 def public_meta(meta: dict) -> dict:
+    watched = engine.youtube_url(meta.get("youtube_url") or "")
+    class_id = str(meta.get("id") or "")
+    if watched:
+        youtube_state = "listo"
+    elif meta.get("youtube_error"):
+        youtube_state = "error"
+    elif class_id in YOUTUBE_UPLOADS:
+        youtube_state = "subiendo"
+    elif not youtube_up.configured():
+        youtube_state = "falta"
+    else:
+        youtube_state = ""
     return {
         "id": meta.get("id"),
         "title": meta.get("title") or "Clase",
@@ -289,6 +368,10 @@ def public_meta(meta: dict) -> dict:
         "title_custom": bool(meta.get("title_custom")),
         "frames": meta.get("frames") or [],
         "started": meta.get("started") or 0,
+        "media_kind": "youtube" if watched else "",
+        "media_src": watched,
+        "youtube_state": youtube_state,
+        "youtube_error": str(meta.get("youtube_error") or "")[:300],
     }
 
 
@@ -372,13 +455,20 @@ def class_detail(class_id: str) -> dict:
     if isinstance(study, dict):
         study = engine.place_youtube(study, lines)
         study["links"] = engine.collect_links(study, lines)
+        if engine.stamp_topics(study, meta.get("frames") or [], lines):
+            (folder / "study.json").write_text(
+                json.dumps(study, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
     source = Path(meta.get("source") or "")
     payload = public_meta(meta)
+    if payload.get("media_kind") != "youtube":
+        payload["media_kind"] = media_kind(source)
+        payload["media_src"] = ""
     payload.update({
         "study": study,
         "lines": lines,
         "chat": chat if isinstance(chat, list) else [],
-        "media_kind": media_kind(source),
     })
     return payload
 
@@ -393,7 +483,7 @@ def run_job(class_id: str) -> None:
         meta = read_meta(class_id)
         source = Path(meta["source"])
         media, audio_override = engine.resolve_source(source)
-        cfg = engine.config_for_job(read_settings())
+        cfg = engine.config_for_job(sync_settings())
         folder = class_dir(class_id)
         duration = engine.probe_duration(media if engine.has_video(media) else (audio_override or media))
         update_meta(class_id, duration=duration, status="processing", error="", started=int(datetime.now().timestamp()))
@@ -490,6 +580,7 @@ def run_job(class_id: str) -> None:
         else:
             saved_title = model_title
         study["titulo"] = saved_title
+        course = engine.apply_course(fresh, study)
         (folder / "study.json").write_text(json.dumps(study, ensure_ascii=False, indent=2), encoding="utf-8")
         update_meta(
             class_id,
@@ -497,6 +588,7 @@ def run_job(class_id: str) -> None:
             stage="ready",
             detail="Listo",
             title=saved_title,
+            materia=course,
             error="",
             frames=shots,
         )
@@ -529,6 +621,66 @@ def launch(class_id: str) -> None:
     threading.Thread(target=run_job, args=(class_id,), daemon=True).start()
 
 
+def _youtube_job(class_id: str) -> None:
+    try:
+        meta = read_meta(class_id)
+        source = Path(str(meta.get("source") or ""))
+        title = str(meta.get("title") or source.stem or "Clase")
+        print(f"[ClaseClara] subiendo {class_id} a YouTube", flush=True)
+        watch = youtube_up.upload(source, title)
+        update_meta(class_id, youtube_url=watch, youtube_error="")
+        try:
+            fresh = read_meta(class_id)
+            cloud.link_youtube(
+                class_id,
+                watch,
+                str(fresh.get("title") or title),
+                str(fresh.get("materia") or ""),
+                str(fresh.get("status") or ""),
+            )
+        except Exception:
+            traceback.print_exc()
+        print(f"[ClaseClara] {class_id} quedó en YouTube", flush=True)
+    except Exception as exc:
+        message = str(exc).strip() or "No se pudo subir el video a YouTube."
+        print(f"[ClaseClara] YouTube {class_id}: {message}", flush=True)
+        try:
+            update_meta(class_id, youtube_error=message[:300])
+        except Exception:
+            traceback.print_exc()
+    finally:
+        with YOUTUBE_LOCK:
+            YOUTUBE_UPLOADS.discard(class_id)
+
+
+def start_youtube(class_id: str) -> None:
+    try:
+        meta = read_meta(class_id)
+    except engine.AppError:
+        return
+    if engine.youtube_url(meta.get("youtube_url") or ""):
+        return
+    if meta.get("youtube_error"):
+        return
+    source = Path(str(meta.get("source") or ""))
+    if not source.is_file() or not youtube_up.configured():
+        return
+    with YOUTUBE_LOCK:
+        if class_id in YOUTUBE_UPLOADS:
+            return
+        YOUTUBE_UPLOADS.add(class_id)
+    threading.Thread(target=_youtube_job, args=(class_id,), daemon=True).start()
+
+
+def queue_youtube() -> None:
+    if not youtube_up.configured() or not CLASSES.is_dir():
+        return
+    for folder in CLASSES.iterdir():
+        if not (folder / "meta.json").is_file():
+            continue
+        start_youtube(folder.name)
+
+
 def create_class_from_url(url: str, materia: str, terms: str) -> str:
     class_id = new_id()
     folder = class_dir(class_id)
@@ -556,6 +708,7 @@ def create_class_from_url(url: str, materia: str, terms: str) -> str:
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
         launch(class_id)
+        start_youtube(class_id)
         return class_id
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
@@ -577,20 +730,38 @@ def adopt_pending() -> None:
             except engine.AppError:
                 pass
             continue
-        if (folder / "meta.json").is_file():
+        fuente = folder / "work" / "fuente.mp4"
+        if (folder / "meta.json").is_file() and fuente.is_file():
             try:
-                if read_meta(class_id).get("status") == "processing":
-                    continue
+                status = read_meta(class_id).get("status")
             except (OSError, json.JSONDecodeError, engine.AppError):
+                status = ""
+            if status in {"processing", "error"}:
+                update_meta(
+                    class_id,
+                    status="processing",
+                    stage="audio",
+                    detail="Preparando el video",
+                    error="",
+                )
+                ACTIVE.add(class_id)
+                print(f"[ClaseClara] retoma {class_id} desde el teléfono", flush=True)
+                launch(class_id)
+                start_youtube(class_id)
                 continue
         url = str(row.get("video_url") or "").strip()
-        if not url:
+        if not cloud.ready_source(url):
             continue
         folder.mkdir(parents=True, exist_ok=True)
         dest = folder / "work" / "fuente.mp4"
         try:
             cloud.mark(class_id, "procesando", "Bajando el video")
-            cloud.download(url, dest)
+            if cloud.entrada_count(url):
+                cloud.download_entrada(class_id, cloud.entrada_count(url), dest)
+                saved_url = ""
+            else:
+                cloud.download(url, dest)
+                saved_url = cloud.assert_zoom_url(url)
         except engine.AppError as exc:
             try:
                 cloud.mark(class_id, "error", str(exc))
@@ -601,7 +772,7 @@ def adopt_pending() -> None:
             "id": class_id,
             "title": str(row.get("titulo") or "Clase por enlace")[:140],
             "source": str(dest.resolve()),
-            "video_url": url,
+            "video_url": saved_url,
             "materia": str(row.get("materia") or "")[:120],
             "terms": "",
             "created": datetime.now().isoformat(timespec="seconds"),
@@ -615,14 +786,50 @@ def adopt_pending() -> None:
             "started": int(datetime.now().timestamp()),
         }
         write_meta(class_id, meta)
+        ACTIVE.add(class_id)
         print(f"[ClaseClara] empieza {class_id} desde el teléfono", flush=True)
         launch(class_id)
+        start_youtube(class_id)
+
+
+def rescue_cloud() -> None:
+    for class_id in cloud.processing_ids():
+        if class_id in ACTIVE:
+            continue
+        folder = CLASSES / class_id
+        if (folder / "study.json").is_file():
+            try:
+                cloud.publish(class_id)
+            except engine.AppError:
+                pass
+            continue
+        fuente = folder / "work" / "fuente.mp4"
+        if fuente.is_file() and (folder / "meta.json").is_file():
+            update_meta(
+                class_id,
+                status="processing",
+                stage="audio",
+                detail="Preparando el video",
+                error="",
+            )
+            ACTIVE.add(class_id)
+            print(f"[ClaseClara] retoma {class_id}", flush=True)
+            launch(class_id)
+            start_youtube(class_id)
 
 
 def watch_cloud() -> None:
     import time
 
     time.sleep(2)
+    try:
+        cloud.ensure_storage()
+    except Exception:
+        traceback.print_exc()
+    try:
+        sync_settings()
+    except Exception:
+        traceback.print_exc()
     try:
         count = cloud.publish_ready()
         if count:
@@ -631,10 +838,13 @@ def watch_cloud() -> None:
         traceback.print_exc()
     while True:
         try:
+            sync_settings()
             adopt_pending()
+            rescue_cloud()
+            queue_youtube()
         except Exception:
             traceback.print_exc()
-        time.sleep(40)
+        time.sleep(10)
 
 
 def create_class(source: Path, materia: str, terms: str, reuse: bool = False) -> str:
@@ -661,6 +871,7 @@ def create_class(source: Path, materia: str, terms: str, reuse: bool = False) ->
     write_meta(class_id, meta)
     print(f"[ClaseClara] empieza {class_id} {media.name}", flush=True)
     launch(class_id)
+    start_youtube(class_id)
     return class_id
 
 
@@ -673,8 +884,9 @@ def rename_class(class_id: str, title: str, materia: str) -> dict:
     updated = update_meta(
         class_id,
         title=cleaned,
-        materia=materia.strip()[:120],
+        materia=" ".join(materia.split())[:120],
         title_custom=custom,
+        materia_custom=True,
     )
     study_path = class_dir(class_id) / "study.json"
     study = read_json(study_path, None)
@@ -720,9 +932,11 @@ def retry_class(class_id: str, retranscribe: bool) -> None:
         detail="Retomando la clase",
         error="",
         reuse_transcript=reuse,
+        youtube_error="",
         started=int(datetime.now().timestamp()),
     )
     launch(class_id)
+    start_youtube(class_id)
 
 
 def pick_video() -> str:
@@ -964,6 +1178,13 @@ class Handler(BaseHTTPRequestHandler):
                 chosen = pick_video()
                 self._json(200, {"path": chosen})
                 return
+            if path == "/api/youtube/connect":
+                body = self._read_json()
+                self._json(200, youtube_up.connect(
+                    str(body.get("client_id") or ""),
+                    str(body.get("client_secret") or ""),
+                ))
+                return
             if path == "/api/classes":
                 body = self._read_json()
                 raw_url = str(body.get("url") or "").strip()
@@ -1049,6 +1270,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             write_meta(class_id, meta)
             launch(class_id)
+            start_youtube(class_id)
         except Exception:
             shutil.rmtree(folder, ignore_errors=True)
             raise
@@ -1081,7 +1303,7 @@ class Handler(BaseHTTPRequestHandler):
                 meta.get("materia") or "",
                 history,
                 question,
-                engine.config_for_chat(read_settings()),
+                engine.config_for_chat(sync_settings()),
             )
             history.append({"role": "user", "content": question})
             history.append({"role": "assistant", "content": reply})
@@ -1143,6 +1365,7 @@ def static_target(path: str) -> Path | None:
 def self_test() -> None:
     engine.self_test()
     cloud.self_test()
+    youtube_up.self_test()
     body = (
         b"--BOUND\r\n"
         b'Content-Disposition: form-data; name="terms"\r\n\r\n'
@@ -1170,6 +1393,13 @@ def self_test() -> None:
 
     server = make_server(0)
     port = server.server_address[1]
+    real_push = cloud.push_ia
+    real_fetch = cloud.fetch_ia
+    def _fetch_blocked():
+        raise engine.AppError("prueba sin red")
+
+    cloud.push_ia = lambda raw: None
+    cloud.fetch_ia = _fetch_blocked
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     settings_backup = SETTINGS.read_bytes() if SETTINGS.is_file() else None
@@ -1235,6 +1465,8 @@ def self_test() -> None:
         assert saved["chat"]["provider"] == "openai"
         assert "providers" in saved
     finally:
+        cloud.push_ia = real_push
+        cloud.fetch_ia = real_fetch
         if settings_backup is None:
             SETTINGS.unlink(missing_ok=True)
         else:

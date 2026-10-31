@@ -1,10 +1,15 @@
 (function () {
   const cfg = window.CLASECLARA_CLOUD;
-  const native = window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform();
+  const cap = window.Capacitor;
+  const native = Boolean(
+    window.androidBridge
+    || (cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform())
+  );
   const host = location.hostname;
   const onPc = host === "127.0.0.1" || host === "localhost";
   const onWeb = !native && !onPc;
-  if (!cfg || !cfg.url || !cfg.anon || onPc) return;
+  // El APK también abre en localhost. En el teléfono igual se usa la cuenta.
+  if (!cfg || !cfg.url || !cfg.anon || (onPc && !native)) return;
 
   const videosKey = "cc-videos";
   const sessionKey = "cc-session";
@@ -41,7 +46,7 @@
   }
 
   function playback(url) {
-    if (!url) return "";
+    if (!url || String(url).startsWith("entrada:")) return "";
     return url.replace("/rec/play/", "/rec/download/").replace("/rec/share/", "/rec/download/");
   }
 
@@ -168,6 +173,17 @@
   async function localSrc(id) {
     if (memory[id]) return memory[id];
     const path = videoMap()[id];
+    if (path === "opfs" && navigator.storage && navigator.storage.getDirectory) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const handle = await root.getFileHandle(`${id}.bin`);
+        const stored = await handle.getFile();
+        memory[id] = URL.createObjectURL(stored);
+        return memory[id];
+      } catch {
+        return "";
+      }
+    }
     if (path === "navegador") {
       const blob = await idbGet(id).catch(() => null);
       if (blob) {
@@ -185,15 +201,67 @@
     }
   }
 
-  async function saveFile(id, file, onProgress) {
-    const fs = window.Capacitor?.Plugins?.Filesystem;
-    if (!fs || !file.stream) {
+  const mediaExt = [".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".m4a", ".mp3", ".wav", ".aac", ".ogg"];
+
+  function acceptedMedia(file) {
+    const name = String(file && file.name || "").toLowerCase();
+    if (mediaExt.some((ext) => name.endsWith(ext))) return true;
+    const type = String(file && file.type || "").toLowerCase();
+    return type.startsWith("video/") || type.startsWith("audio/");
+  }
+
+  function rememberBrowser(id, file) {
+    try { if (memory[id]) URL.revokeObjectURL(memory[id]); } catch { /* el anterior ya se soltó */ }
+    memory[id] = URL.createObjectURL(file);
+  }
+
+  async function persistBrowser(id, file) {
+    if (navigator.storage && navigator.storage.getDirectory) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const handle = await root.getFileHandle(`${id}.bin`, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(file);
+        await writable.close();
+        const map = videoMap();
+        map[id] = "opfs";
+        localStorage.setItem(videosKey, JSON.stringify(map));
+        return;
+      } catch { /* sigue el intento corto de abajo */ }
+    }
+    if (file.size > 80 * 1024 * 1024) return;
+    try {
       await idbPut(id, file);
       const map = videoMap();
       map[id] = "navegador";
       localStorage.setItem(videosKey, JSON.stringify(map));
-      memory[id] = URL.createObjectURL(file);
-      if (onProgress) onProgress("Video guardado en este navegador");
+    } catch { /* este navegador igual reproduce el video en esta visita */ }
+  }
+
+  async function forgetBrowser(id) {
+    const map = videoMap();
+    const kind = map[id];
+    delete map[id];
+    localStorage.setItem(videosKey, JSON.stringify(map));
+    if (memory[id]) {
+      try { URL.revokeObjectURL(memory[id]); } catch { /* ya se soltó */ }
+      delete memory[id];
+    }
+    idbDelete(id);
+    if (kind === "opfs" && navigator.storage && navigator.storage.getDirectory) {
+      try {
+        const root = await navigator.storage.getDirectory();
+        await root.removeEntry(`${id}.bin`);
+      } catch { /* ya no estaba */ }
+    }
+  }
+
+  async function saveFile(id, file, onProgress) {
+    const fs = window.Capacitor?.Plugins?.Filesystem;
+    if (!fs || !file.stream) {
+      rememberBrowser(id, file);
+      await persistBrowser(id, file);
+      if (onProgress) onProgress("Video listo en este navegador");
       return;
     }
     const path = `videos/${id}.mp4`;
@@ -230,32 +298,57 @@
 
   function noticeFor(row) {
     const estado = row.estado || "lista";
-    if (estado === "local") {
-      const donde = onWeb ? "en este navegador" : "en el teléfono";
-      return `Este video quedó ${donde}. Para tener la explicación en todos los dispositivos, pega el enlace de Zoom: la PC lo prepara.`;
-    }
     if (estado === "pendiente" || estado === "procesando") {
-      return "El video ya se puede ver. La explicación, las diapositivas y la transcripción llegan cuando la PC termine esta clase.";
+      return "Puedes ver el video en este aparato. La explicación se escribe en la computadora donde ClaseClara está abierto.";
     }
     return "";
   }
 
+  function stageOf(estado, detalle) {
+    const text = String(detalle || "").toLowerCase();
+    if (estado === "lista" || estado === "local") return "ready";
+    if (text.includes("explica") || text.includes("esquema")) return "study";
+    if (text.includes("pizarra") || text.includes("captura") || text.includes("diapositiva")) return "frames";
+    if (text.includes("transcrib")) return "transcript";
+    return "audio";
+  }
+
+  function viewStatus(estado) {
+    if (estado === "error") return "error";
+    if (estado === "pendiente" || estado === "procesando") return "processing";
+    return "ready";
+  }
+
   function card(row) {
     const estado = row.estado || "lista";
+    const started = Date.parse(row.creado || "");
     const avisos = Array.isArray(row.estudio?.avisos) ? row.estudio.avisos.length : 0;
+    const watch = typeof youtubeHref === "function" ? youtubeHref(row.video_url || "") : "";
+    const remote = watch ? "" : playback(row.video_url || "");
     return {
       id: row.id,
       title: row.titulo || "Clase",
       materia: row.materia || "",
-      status: estado === "error" ? "error" : "ready",
-      stage: estado,
+      status: viewStatus(estado),
+      stage: stageOf(estado, row.detalle),
       detail: row.detalle || "",
       error: estado === "error" ? (row.detalle || "Se detuvo.") : "",
       created: row.creado || "",
+      started: Number.isFinite(started) ? Math.floor(started / 1000) : 0,
       duration: row.duracion || 0,
       avisos,
       title_custom: false,
+      media_kind: watch ? "youtube" : (remote ? "video" : ""),
+      media_src: watch || remote,
+      youtube_state: watch ? "listo" : "",
     };
+  }
+
+  async function withLocal(item) {
+    if (item.media_src) return item;
+    const local = await localSrc(item.id);
+    if (!local) return item;
+    return { ...item, media_kind: "video", media_src: local };
   }
 
   async function one(id) {
@@ -273,8 +366,9 @@
       if (!file) continue;
       frames.push({ file, time: slide.tiempo || 0 });
     }
-    const local = await localSrc(id);
-    const remote = playback(row.video_url || "");
+    const watch = typeof youtubeHref === "function" ? youtubeHref(row.video_url || "") : "";
+    const local = watch ? "" : await localSrc(id);
+    const remote = watch ? "" : playback(row.video_url || "");
     const transcript = row.transcripcion || {};
     return {
       ...card(row),
@@ -282,78 +376,410 @@
       lines: Array.isArray(transcript.lines) ? transcript.lines : [],
       chat: Array.isArray(row.chat) ? row.chat : [],
       frames,
-      media_kind: local || remote ? "video" : "",
-      media_src: local || remote,
+      media_kind: watch ? "youtube" : (local || remote ? "video" : ""),
+      media_src: watch || local || remote,
       notice: noticeFor(row),
     };
   }
 
+  async function putPart(path, blob, failMessage) {
+    const fail = failMessage || "No pude enviar el video para prepararlo.";
+    await session();
+    const safe = path.split("/").map(encodeURIComponent).join("/");
+    const response = await fetch(`${cfg.url}/storage/v1/object/diapositivas/${safe}`, {
+      method: "POST",
+      headers: {
+        apikey: cfg.anon,
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/octet-stream",
+        "x-upsert": "true",
+      },
+      body: blob,
+    });
+    if (response.status === 401) {
+      localStorage.removeItem(sessionKey);
+      access = "";
+      await session();
+      const again = await fetch(`${cfg.url}/storage/v1/object/diapositivas/${safe}`, {
+        method: "POST",
+        headers: {
+          apikey: cfg.anon,
+          Authorization: `Bearer ${access}`,
+          "Content-Type": "application/octet-stream",
+          "x-upsert": "true",
+        },
+        body: blob,
+      });
+      if (!again.ok) throw new Error(fail);
+      return;
+    }
+    if (!response.ok) throw new Error(fail);
+  }
+
+  async function uploadEntrada(id, file, onProgress) {
+    const part = 8 * 1024 * 1024;
+    const total = Math.max(1, Math.ceil(file.size / part));
+    for (let index = 0; index < total; index += 1) {
+      const blob = file.slice(index * part, Math.min(file.size, (index + 1) * part));
+      const name = `${id}/entrada/${String(index).padStart(3, "0")}`;
+      await putPart(name, blob);
+      if (onProgress) onProgress(`Enviando el video… ${Math.round(((index + 1) / total) * 100)}%`);
+    }
+    return total;
+  }
+
+  function studyReady(row) {
+    const study = (row && row.estudio) || {};
+    return Boolean((study.explicacion || []).length || study.resumen);
+  }
+
   async function saveEntry({ link, file, materia, classId, onProgress }) {
     if (link) assertZoom(link);
+    if (file && file.size > 2500000000) throw new Error("Ese video pasa de 2.5 GB.");
+    if (file && !file.size) throw new Error("Ese archivo está vacío.");
+    if (file && !acceptedMedia(file)) {
+      throw new Error("Ese archivo no es el video. Elige el .mp4, .mkv o el audio .m4a.");
+    }
     const id = classId || newId();
-    if (file) await saveFile(id, file, onProgress);
-    if (classId) {
-      const patch = {};
-      if (link) patch.video_url = link;
-      if (materia) patch.materia = materia.slice(0, 120);
-      if (link) {
-        const current = await one(classId);
-        const study = current.estudio || {};
-        const ready = (study.explicacion || []).length || study.resumen;
-        if (!ready) {
-          patch.estado = "pendiente";
-          patch.detalle = "Esperando a la PC";
-        }
+    const course = (materia || "").slice(0, 120);
+    const nativeStore = Boolean(file && window.Capacitor?.Plugins?.Filesystem && file.stream);
+    if (file && nativeStore) await saveFile(id, file, onProgress);
+    else if (file) rememberBrowser(id, file);
+    if (!classId) {
+      const titulo = (file ? file.name.replace(/\.[^.]+$/, "") : "Clase por enlace").slice(0, 140);
+      await rest("POST", "/rest/v1/clases", {
+        id,
+        titulo,
+        materia: course,
+        video_url: link || "",
+        estudio: {},
+        transcripcion: {},
+        chat: [],
+        estado: "pendiente",
+        detalle: "La computadora prepara el video y lo publica",
+      });
+    }
+    if (file && !link) {
+      if (classId && studyReady(await one(classId))) return id;
+      try {
+        const count = await uploadEntrada(id, file, onProgress);
+        await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, {
+          video_url: `entrada:${count}`,
+          materia: course,
+          estado: "pendiente",
+          detalle: "La computadora prepara el video y lo publica",
+        });
+        if (!nativeStore) persistBrowser(id, file);
+      } catch (error) {
+        try {
+          await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, {
+            estado: "error",
+            detalle: "No pude enviar el video",
+          });
+        } catch { /* el aviso de abajo explica el fallo */ }
+        throw error;
       }
-      if (Object.keys(patch).length) await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, patch);
       return id;
     }
-    const titulo = (file ? file.name.replace(/\.[^.]+$/, "") : "Clase por enlace").slice(0, 140);
-    await rest("POST", "/rest/v1/clases", {
-      id,
-      titulo,
-      materia: (materia || "").slice(0, 120),
-      video_url: link || "",
-      estudio: {},
-      transcripcion: {},
-      chat: [],
-      estado: link ? "pendiente" : "local",
-      detalle: link ? "Esperando a la PC" : "Video solo en este teléfono",
-    });
+    if (link) {
+      let keep = false;
+      if (classId) {
+        keep = studyReady(await one(classId));
+      }
+      const patch = { video_url: link };
+      if (course) patch.materia = course;
+      if (!keep) {
+        patch.estado = "pendiente";
+        patch.detalle = "La computadora prepara el video y lo publica";
+      }
+      if (classId || course) await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, patch);
+      return id;
+    }
     return id;
   }
 
-  function statusBody() {
+  async function saveYouTube(classId, url) {
+    const watch = typeof youtubeHref === "function" ? youtubeHref(url) : "";
+    if (!watch) throw new Error("Pega un enlace de YouTube, el de youtube.com/watch o youtu.be.");
+    await rest("PATCH", `/rest/v1/clases?id=eq.${classId}`, { video_url: watch });
+    return watch;
+  }
+
+  const phoneProviders = [
+    { id: "grok", label: "Grok (xAI)", hears: true, vision: true, default_model: "grok-4.7", default_stt_model: "grok-voice-transcribe-2.0", key_url: "https://console.x.ai", note: "Una sola clave transcribe y explica. Si se acaban los créditos, elige otro proveedor." },
+    { id: "openai", label: "OpenAI", hears: true, vision: true, default_model: "gpt-4.1", default_stt_model: "gpt-transcribe", key_url: "https://platform.openai.com/api-keys", note: "La misma clave transcribe y mira las diapositivas." },
+    { id: "gemini", label: "Gemini (Google)", hears: true, vision: true, default_model: "gemini-2.5-flash", default_stt_model: "gemini-2.5-flash", key_url: "https://aistudio.google.com/apikey", note: "La misma clave transcribe el audio por tramos y mira las diapositivas." },
+    { id: "claude", label: "Claude (Anthropic)", hears: false, vision: true, default_model: "claude-sonnet-4-5", default_stt_model: "", key_url: "https://console.anthropic.com", note: "Claude no oye el audio. Abajo elige quién transcribe." },
+    { id: "mistral", label: "Mistral", hears: true, vision: true, default_model: "pixtral-large-latest", default_stt_model: "voxtral-mini-transcribe-3", key_url: "https://console.mistral.ai", note: "Pixtral mira las diapositivas y Voxtral transcribe." },
+    { id: "groq", label: "Groq", hears: true, vision: false, default_model: "llama-3.3-70b-versatile", default_stt_model: "whisper-large-v3-turbo", key_url: "https://console.groq.com/keys", note: "Whisper transcribe. Este chat no recibe las diapositivas. Para que las mire, usa Grok, OpenAI, Gemini, Claude o Mistral." },
+    { id: "openrouter", label: "OpenRouter", hears: false, vision: true, default_model: "openai/gpt-4.1", default_stt_model: "", key_url: "https://openrouter.ai/keys", note: "No transcribe. Elige abajo quién oye la clase. El modelo se escribe como proveedor/modelo." },
+    { id: "compatible", label: "Otro (compatible con OpenAI)", hears: true, vision: true, default_model: "", default_stt_model: "", key_url: "", note: "Pega una URL compatible con OpenAI, por ejemplo https://tu-servidor/v1." },
+  ];
+
+  let iaCache = null;
+
+  const chatUrls = {
+    grok: "https://api.x.ai/v1/chat/completions",
+    openai: "https://api.openai.com/v1/chat/completions",
+    gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    mistral: "https://api.mistral.ai/v1/chat/completions",
+    groq: "https://api.groq.com/openai/v1/chat/completions",
+    openrouter: "https://openrouter.ai/api/v1/chat/completions",
+    claude: "https://api.anthropic.com/v1/messages",
+  };
+
+  function safeError(text) {
+    return String(text || "La IA no respondió.").replace(/sk-[A-Za-z0-9_-]{8,}/g, "la clave").slice(0, 180);
+  }
+
+  async function loadIa() {
+    const previous = iaCache;
+    try {
+      await session();
+      const response = await fetch(`${cfg.url}/storage/v1/object/diapositivas/ajustes/ia.json?t=${Date.now()}`, {
+        cache: "no-store",
+        headers: { apikey: cfg.anon, Authorization: `Bearer ${access}` },
+      });
+      if (!response.ok) return previous;
+      const data = await response.json().catch(() => null);
+      if (!data || typeof data !== "object" || (!data.chat_key && !data.stt_key)) return previous;
+      iaCache = data;
+      return iaCache;
+    } catch {
+      return previous;
+    }
+  }
+
+  function cleanBase(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (text.length > 300) throw new Error("La URL es demasiado larga.");
+    let parsed;
+    try { parsed = new URL(text); } catch { throw new Error("La URL tiene que empezar por https://."); }
+    const host = (parsed.hostname || "").toLowerCase();
+    const local = host === "127.0.0.1" || host === "localhost";
+    if (parsed.protocol === "https:" && host) return text.replace(/\/+$/, "");
+    if (parsed.protocol === "http:" && local) return text.replace(/\/+$/, "");
+    throw new Error("La URL tiene que empezar por https://.");
+  }
+
+  function keepKey(posted, oldKey, providerChanged) {
+    const text = String(posted || "").replace(/[\r\n]/g, "").trim();
+    if (text) {
+      if (text.length > 500) throw new Error("Esa clave es demasiado larga.");
+      return text;
+    }
+    if (providerChanged) return "";
+    return oldKey || "";
+  }
+
+  function postedText(posted, field, fallback, limit) {
+    if (!Object.prototype.hasOwnProperty.call(posted, field)) return String(fallback || "");
+    return String(posted[field] || "").replace(/[\r\n]/g, "").trim().slice(0, limit);
+  }
+
+  async function saveIa(posted) {
+    const current = (await loadIa()) || {};
+    const incoming = posted && typeof posted === "object" ? posted : {};
+    const has = (field) => Object.prototype.hasOwnProperty.call(incoming, field);
+    const previousChat = String(current.chat_provider || "");
+    const chatProvider = has("chat_provider")
+      ? String(incoming.chat_provider || previousChat || "openai")
+      : (previousChat || "openai");
+    if (!phoneProviders.some((item) => item.id === chatProvider)) throw new Error("Ese proveedor no está en la lista.");
+    const previousStt = String(current.stt_provider || "same");
+    const sttProvider = has("stt_provider") ? String(incoming.stt_provider || "same") : previousStt;
+    if (sttProvider !== "same") {
+      const spec = phoneProviders.find((item) => item.id === sttProvider);
+      if (!spec || !spec.hears) throw new Error("Ese proveedor no transcribe audio.");
+    }
+    const fondo = has("fondo")
+      ? (incoming.fondo === "oscuro" ? "oscuro" : "claro")
+      : (current.fondo === "oscuro" ? "oscuro" : "claro");
+    const data = {
+      chat_provider: chatProvider,
+      chat_key: keepKey(incoming.chat_key, current.chat_key, has("chat_provider") && chatProvider !== previousChat),
+      chat_model: postedText(incoming, "chat_model", current.chat_model, 120),
+      chat_base: has("chat_base") ? cleanBase(incoming.chat_base) : String(current.chat_base || ""),
+      stt_provider: sttProvider,
+      stt_key: keepKey(incoming.stt_key, current.stt_key, has("stt_provider") && sttProvider !== previousStt),
+      stt_model: postedText(incoming, "stt_model", current.stt_model, 120),
+      stt_base: has("stt_base") ? cleanBase(incoming.stt_base) : String(current.stt_base || ""),
+      fondo,
+      actualizado: Math.floor(Date.now() / 1000),
+    };
+    if (!data.chat_key && !data.stt_key) throw new Error("Pega la clave de este proveedor.");
+    const blob = new Blob([JSON.stringify(data)], { type: "application/octet-stream" });
+    await putPart("ajustes/ia.json", blob, "No pude guardar la clave en la cuenta.");
+    iaCache = data;
+    return statusBody(data);
+  }
+
+  function answerText(data) {
+    const openai = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (openai) return String(openai).trim();
+    const blocks = data && Array.isArray(data.content) ? data.content : [];
+    return blocks
+      .filter((block) => block && block.type === "text" && block.text)
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+  }
+
+  async function postJson(url, headers, body) {
+    const http = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+    const native = window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform();
+    if (http && native) {
+      const result = await http.request({ url, method: "POST", headers, data: body });
+      const status = Number(result && result.status) || 0;
+      let data = result ? result.data : {};
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { data = {}; }
+      }
+      if (status >= 400) throw new Error(safeError(data && data.error && data.error.message));
+      return data || {};
+    }
+    const throughPage = onWeb;
+    const response = await fetch(throughPage ? "/.netlify/functions/ai" : url, {
+      method: "POST",
+      headers: throughPage ? { "Content-Type": "application/json" } : headers,
+      body: JSON.stringify(throughPage ? { url, headers, body } : body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(safeError(data && data.error && data.error.message));
+    return data;
+  }
+
+  function clipText(text) {
+    const value = String(text || "");
+    if (value.length <= 70000) return value;
+    const head = Math.floor(70000 * 2 / 3);
+    return `${value.slice(0, head)}\n\n[...trozo del medio omitido por largo...]\n\n${value.slice(value.length - (70000 - head))}`;
+  }
+
+  function chatEndpoint(ia) {
+    const provider = (ia && ia.chat_provider) || "";
+    if (provider === "compatible") {
+      const root = String(ia.chat_base || "").trim().replace(/\/+$/, "");
+      if (!root) return "";
+      if (root.endsWith("/chat/completions")) return root;
+      return `${root}/chat/completions`;
+    }
+    return chatUrls[provider] || "";
+  }
+
+  async function askRemote(id, message) {
+    const ia = await loadIa();
+    if (!ia || !ia.chat_key) {
+      throw new Error("Pega la clave en Configurar.");
+    }
+    const url = chatEndpoint(ia);
+    if (!url) throw new Error("Ese proveedor responde desde la computadora.");
+    const anthropic = ia.chat_provider === "claude";
+    const row = await one(id);
+    const study = row.estudio || {};
+    const transcript = row.transcripcion || {};
+    const spoken = transcript.text || (Array.isArray(transcript.lines)
+      ? transcript.lines.map((line) => `[${line.stamp || ""}] ${line.speaker || ""}: ${line.text || ""}`).join("\n")
+      : "");
+    const history = Array.isArray(row.chat) ? row.chat : [];
+    const messages = [
+      {
+        role: "system",
+        content: "Eres el profesor particular de una clase ya grabada. Respondes en español claro, con frases cortas. Usas la transcripción y el material de estudio. Si algo no está en la clase, lo dices. No inventas citas. Cuando nombres un momento, escribe el tiempo como MM:SS.",
+      },
+      {
+        role: "user",
+        content: `Materia: ${row.materia || "no indicada"}\n\nMaterial:\n${JSON.stringify(study)}\n\nTranscripción:\n${clipText(spoken)}`,
+      },
+      { role: "assistant", content: "Listo. Pregunta sobre esta clase." },
+    ];
+    history.slice(-8).forEach((turn) => {
+      if ((turn.role === "user" || turn.role === "assistant") && turn.content) {
+        messages.push({ role: turn.role, content: String(turn.content) });
+      }
+    });
+    messages.push({ role: "user", content: message });
+    const spec = phoneProviders.find((item) => item.id === ia.chat_provider);
+    const model = ia.chat_model || (spec && spec.default_model) || "gpt-4.1";
+    const data = anthropic
+      ? await postJson(url, {
+        "x-api-key": ia.chat_key,
+        "anthropic-version": "2023-06-01",
+      }, {
+        model,
+        max_tokens: 4000,
+        system: messages[0].content,
+        messages: messages.slice(1),
+      })
+      : await postJson(url, {
+        Authorization: `Bearer ${ia.chat_key}`,
+        "Content-Type": "application/json",
+      }, { model, messages });
+    const answer = answerText(data);
+    if (!answer) throw new Error("La IA no devolvió una respuesta.");
+    const chat = history.concat([
+      { role: "user", content: message },
+      { role: "assistant", content: String(answer).trim() },
+    ]);
+    await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, { chat });
+    return { chat };
+  }
+
+  function statusBody(ia) {
+    const data = ia || {};
+    const provider = data.chat_provider || "openai";
+    const spec = phoneProviders.find((item) => item.id === provider) || phoneProviders.find((item) => item.id === "openai");
+    const sttChoice = data.stt_provider || "same";
+    const sttId = sttChoice === "same" ? provider : sttChoice;
+    const sttSpec = phoneProviders.find((item) => item.id === sttId) || spec;
+    const model = data.chat_model || (spec && spec.default_model) || "";
+    const sttModel = data.stt_model || (sttSpec && sttSpec.default_stt_model) || "";
+    const hasChat = Boolean(data.chat_key);
+    const hasStt = sttChoice === "same" ? hasChat : Boolean(data.stt_key);
     return {
-      ready: true,
-      has_key: true,
-      missing: "",
+      ready: hasChat,
+      remote: true,
+      has_key: hasChat,
+      missing: hasChat ? "" : "Pega la clave en Configurar.",
       ffmpeg: false,
       chat: {
-        provider: "grok",
-        label: "Supabase",
-        model: "",
-        base: "",
-        has_key: true,
+        provider,
+        label: spec ? spec.label : "OpenAI",
+        model,
+        base: data.chat_base || "",
+        has_key: hasChat,
         from_env: false,
-        vision: false,
-        hears: false,
-        key_url: cfg.url,
-        note: "La explicación se prepara en la PC y llega aquí.",
+        vision: Boolean(spec && spec.vision),
+        hears: Boolean(spec && spec.hears),
+        key_url: (spec && spec.key_url) || "",
+        note: (spec && spec.note) || "",
       },
-      stt: { provider: "same", label: "El mismo proveedor", model: "", base: "", has_key: true, from_env: false },
-      providers: [],
+      stt: {
+        provider: sttChoice,
+        label: sttChoice === "same" ? "El mismo proveedor" : (sttSpec ? sttSpec.label : ""),
+        model: sttModel,
+        base: data.stt_base || "",
+        has_key: hasStt,
+        from_env: false,
+      },
+      providers: phoneProviders,
+      fondo: data.fondo === "oscuro" ? "oscuro" : "claro",
     };
   }
 
   async function api(url, options) {
     const method = ((options && options.method) || "GET").toUpperCase();
-    if (url === "/api/status") return statusBody();
-    if (url === "/api/settings" && method === "POST") return statusBody();
+    if (url === "/api/status") return statusBody(await loadIa());
+    if (url === "/api/settings" && method === "POST") {
+      const posted = JSON.parse((options && options.body) || "{}");
+      return saveIa(posted);
+    }
     if (url === "/api/zoom") return { recordings: [] };
     if (url === "/api/classes" && method === "GET") {
-      const rows = await rest("GET", "/rest/v1/clases?select=id,titulo,materia,duracion,estado,detalle,creado,estudio&order=creado.desc") || [];
-      return { classes: rows.map(card) };
+      const rows = await rest("GET", "/rest/v1/clases?select=id,titulo,materia,duracion,estado,detalle,creado,estudio&order=creado.desc");
+      const list = Array.isArray(rows) ? rows : [];
+      return { classes: list.map(card) };
     }
     if (url === "/api/classes" && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
@@ -361,7 +787,7 @@
       return { id };
     }
     const job = url.match(/^\/api\/jobs\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})$/);
-    if (job) return card(await one(job[1]));
+    if (job) return withLocal(card(await one(job[1])));
     const title = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/title$/);
     if (title && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
@@ -375,21 +801,45 @@
     if (item && method === "GET") return detail(item[1]);
     if (item && method === "DELETE") {
       await rest("DELETE", `/rest/v1/clases?id=eq.${item[1]}`);
-      const map = videoMap();
-      delete map[item[1]];
-      localStorage.setItem(videosKey, JSON.stringify(map));
-      delete memory[item[1]];
-      idbDelete(item[1]);
+      try {
+        await session();
+        await fetch(`${cfg.url}/storage/v1/object/diapositivas`, {
+          method: "DELETE",
+          headers: {
+            apikey: cfg.anon,
+            Authorization: `Bearer ${access}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ prefixes: [item[1]] }),
+        });
+      } catch { /* la clase ya se borró */ }
+      await forgetBrowser(item[1]);
       return { ok: true };
     }
-    if (/\/chat$/.test(url)) {
-      throw new Error("Las preguntas nuevas se hacen en la computadora. Aquí puedes leer las que ya se guardaron.");
+    const retry = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/retry$/);
+    if (retry && method === "POST") {
+      const row = await one(retry[1]);
+      if (!row.video_url) throw new Error("Esa clase ya no tiene el video para prepararla de nuevo.");
+      if (typeof youtubeHref === "function" && youtubeHref(row.video_url)) {
+        throw new Error("Esta clase se ve por YouTube. Para prepararla de nuevo pega el enlace de Zoom o el archivo.");
+      }
+      await rest("PATCH", `/rest/v1/clases?id=eq.${retry[1]}`, {
+        estado: "pendiente",
+        detalle: "La computadora prepara el video y lo publica",
+      });
+      return withLocal(card(await one(retry[1])));
     }
-    if (/\/retry$/.test(url)) throw new Error("Esta clase se prepara en la computadora.");
+    const chat = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/chat$/);
+    if (chat && method === "POST") {
+      const body = JSON.parse((options && options.body) || "{}");
+      const message = String(body.message || "").trim();
+      if (!message) throw new Error("Escribe una pregunta.");
+      return askRemote(chat[1], message);
+    }
     throw new Error("Esa acción no está en esta página.");
   }
 
-  window.claseClaraCloud = { api, saveEntry };
+  window.claseClaraCloud = { api, saveEntry, saveYouTube };
 
   function showLogin() {
     const root = document.querySelector("#app");
