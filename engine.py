@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -110,6 +111,48 @@ PROVIDERS = {
         "vision": True,
         "env": "OPENROUTER_API_KEY",
         "note": "No transcribe. Elige abajo quién oye la clase. El modelo se escribe como proveedor/modelo.",
+    },
+    "deepgram": {
+        "label": "Deepgram",
+        "chat_kind": "",
+        "chat_url": "",
+        "chat_model": "",
+        "stt": "deepgram",
+        "stt_model": "nova-3",
+        "stt_url": "https://api.deepgram.com/v1/listen",
+        "key_url": "https://console.deepgram.com",
+        "vision": False,
+        "voice_only": True,
+        "env": "DEEPGRAM_API_KEY",
+        "note": "Solo transcribe. Arriba elige quién explica y pega aquí la clave de Deepgram. El modelo nova-3 oye español.",
+    },
+    "assemblyai": {
+        "label": "AssemblyAI",
+        "chat_kind": "",
+        "chat_url": "",
+        "chat_model": "",
+        "stt": "assemblyai",
+        "stt_model": "universal-3-5-pro",
+        "stt_url": "https://api.assemblyai.com",
+        "key_url": "https://www.assemblyai.com/dashboard/home",
+        "vision": False,
+        "voice_only": True,
+        "env": "ASSEMBLYAI_API_KEY",
+        "note": "Solo transcribe. Arriba elige quién explica y pega aquí la clave de AssemblyAI.",
+    },
+    "elevenlabs": {
+        "label": "ElevenLabs",
+        "chat_kind": "",
+        "chat_url": "",
+        "chat_model": "",
+        "stt": "elevenlabs",
+        "stt_model": "scribe_v2",
+        "stt_url": "https://api.elevenlabs.io/v1/speech-to-text",
+        "key_url": "https://elevenlabs.io/app/settings/api-keys",
+        "vision": False,
+        "voice_only": True,
+        "env": "ELEVENLABS_API_KEY",
+        "note": "Solo transcribe. Arriba elige quién explica y pega aquí la clave de ElevenLabs.",
     },
     "compatible": {
         "label": "Otro (compatible con OpenAI)",
@@ -597,6 +640,9 @@ def merge_settings(current_raw: dict | None, posted: dict) -> dict:
         chat_provider = current["chat_provider"]
     if chat_provider not in PROVIDERS:
         raise AppError("Ese proveedor no está en la lista.")
+    if PROVIDERS[chat_provider].get("voice_only"):
+        label = PROVIDERS[chat_provider]["label"]
+        raise AppError(f"{label} solo transcribe. Elige otro para explicar y pon su clave en la voz.")
     if "stt_provider" in posted:
         stt_provider = str(posted.get("stt_provider") or "same")
     else:
@@ -705,6 +751,8 @@ def resolve_config(raw: dict | None) -> AiConfig:
 
 
 def _missing_reason(cfg: AiConfig) -> str:
+    if PROVIDERS[cfg.chat_provider].get("voice_only"):
+        return f"{cfg.chat_label} solo transcribe. Elige otro para explicar la clase."
     if not cfg.chat_key:
         return f"Falta la clave de {cfg.chat_label}."
     if cfg.chat_provider == "compatible" and not cfg.chat_url:
@@ -729,6 +777,7 @@ def provider_catalog() -> list[dict]:
             "id": pid,
             "label": spec["label"],
             "hears": spec.get("stt") is not None,
+            "explains": not spec.get("voice_only"),
             "vision": bool(spec.get("vision")),
             "needs_base": pid == "compatible",
             "default_model": spec.get("chat_model") or "",
@@ -773,6 +822,8 @@ def public_config(raw: dict | None) -> dict:
 
 
 def _check_chat(cfg: AiConfig) -> None:
+    if PROVIDERS[cfg.chat_provider].get("voice_only"):
+        raise AppError(f"{cfg.chat_label} solo transcribe. Elige otro para explicar la clase.")
     if not cfg.chat_key:
         raise AppError(f"Falta la clave de {cfg.chat_label}. Ábrela en Configurar.")
     if not cfg.chat_model:
@@ -793,7 +844,7 @@ def config_for_job(raw: dict | None) -> AiConfig:
     if cfg.stt_same and PROVIDERS[cfg.chat_provider].get("stt") is None:
         raise AppError(
             f"{cfg.chat_label} no transcribe audio. En Configurar elige la voz con "
-            "Grok, OpenAI, Gemini, Mistral o Groq."
+            "Grok, OpenAI, Gemini, Mistral, Groq, Deepgram, AssemblyAI o ElevenLabs."
         )
     if not cfg.stt_key:
         raise AppError(f"Falta la clave para transcribir con {cfg.stt_label}.")
@@ -873,6 +924,10 @@ def _post_json(url: str, body: dict, key: str, timeout: int, label: str, key_url
         headers["anthropic-version"] = "2023-06-01"
     elif auth == "goog":
         headers["x-goog-api-key"] = key
+    elif auth == "raw":
+        headers["authorization"] = key
+    elif auth == "token":
+        headers["Authorization"] = f"Token {key}"
     else:
         headers["Authorization"] = f"Bearer {key}"
     if extra_headers:
@@ -1111,7 +1166,7 @@ def _multipart_prefix(fields: list[tuple[str, str]], boundary: str) -> bytes:
     return b"".join(chunks)
 
 
-def _post_multipart(url: str, fields: list[tuple[str, str]], audio: Path, key: str, label: str, key_url: str) -> tuple[int, str]:
+def _open_audio_connection(url: str, label: str):
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme == "https":
@@ -1120,16 +1175,78 @@ def _post_multipart(url: str, fields: list[tuple[str, str]], audio: Path, key: s
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=60 * 30)
     else:
         raise AppError("Solo puedo enviar el audio a https, o a esta computadora en 127.0.0.1.")
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    return connection, path
+
+
+def _send_audio_body(connection, audio: Path) -> None:
+    with audio.open("rb") as handle:
+        while True:
+            block = handle.read(256 * 1024)
+            if not block:
+                break
+            connection.send(block)
+
+
+def _post_raw(url: str, audio: Path, label: str, header_name: str, header_value: str, content_type: str) -> tuple[int, str]:
+    connection, path = _open_audio_connection(url, label)
+    size = audio.stat().st_size
+    try:
+        connection.putrequest("POST", path)
+        connection.putheader(header_name, header_value)
+        connection.putheader("Content-Type", content_type)
+        connection.putheader("Content-Length", str(size))
+        connection.endheaders()
+        _send_audio_body(connection, audio)
+        response = connection.getresponse()
+        raw = response.read()
+        return response.status, raw.decode("utf-8", "replace")
+    except OSError as exc:
+        raise AppError(f"No pude enviar el audio a {label}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _get_json(url: str, key: str, timeout: int, label: str, key_url: str = "", auth: str = "raw") -> dict:
+    headers = {"authorization": key} if auth == "raw" else {"Authorization": f"Bearer {key}"}
+    request = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            parsed = detail
+        raise AppError(_http_error(exc.code, parsed, label, key_url)) from exc
+    except urllib.error.URLError as exc:
+        raise AppError(f"No pude conectar con {label}: {exc.reason}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AppError(f"La respuesta de {label} no se pudo leer.") from exc
+    if not isinstance(payload, dict):
+        raise AppError(f"La respuesta de {label} llegó vacía.")
+    return payload
+
+
+def _post_multipart(url: str, fields: list[tuple[str, str]], audio: Path, key: str, label: str, key_url: str, auth: str = "bearer") -> tuple[int, str]:
+    connection, path = _open_audio_connection(url, label)
     boundary = "ClaseClara" + os.urandom(8).hex()
     preamble = _multipart_prefix(fields, boundary)
     epilogue = f"\r\n--{boundary}--\r\n".encode("utf-8")
     size = len(preamble) + audio.stat().st_size + len(epilogue)
-    path = parsed.path or "/"
-    if parsed.query:
-        path += "?" + parsed.query
     try:
         connection.putrequest("POST", path)
-        connection.putheader("Authorization", f"Bearer {key}")
+        if auth == "xi":
+            connection.putheader("xi-api-key", key)
+        elif auth == "token":
+            connection.putheader("Authorization", f"Token {key}")
+        else:
+            connection.putheader("Authorization", f"Bearer {key}")
         connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
         connection.putheader("Content-Length", str(size))
         connection.endheaders()
@@ -1305,6 +1422,154 @@ def _transcribe_chunked(audio: Path, cfg: AiConfig, max_bytes: int, one) -> dict
             shutil.rmtree(parts_dir, ignore_errors=True)
 
 
+def _deepgram_params(model: str, keyterms: list[str], spanish_hint: bool) -> list[tuple[str, str]]:
+    params = [("model", model), ("smart_format", "true"), ("punctuate", "true")]
+    if spanish_hint and "nova-3" in model:
+        params.extend([("language", "multi"), ("language_hint", "es")])
+        for term in keyterms:
+            cleaned = term.strip()
+            if cleaned:
+                params.append(("keyterm", cleaned[:50]))
+    else:
+        params.append(("language", "es"))
+    return params
+
+
+def _deepgram_shape(payload: dict) -> dict:
+    results = payload.get("results") if isinstance(payload, dict) else {}
+    channels = (results or {}).get("channels") or []
+    alt = {}
+    if channels and isinstance(channels[0], dict):
+        alternatives = channels[0].get("alternatives") or []
+        if alternatives and isinstance(alternatives[0], dict):
+            alt = alternatives[0]
+    words = []
+    for word in alt.get("words") or []:
+        if not isinstance(word, dict):
+            continue
+        piece = str(word.get("punctuated_word") or word.get("word") or "").strip()
+        if not piece:
+            continue
+        words.append({
+            "text": piece,
+            "start": _seconds(word.get("start")),
+            "speaker": word.get("speaker"),
+        })
+    return {"text": str(alt.get("transcript") or "").strip(), "words": words}
+
+
+def _deepgram_chunk(audio: Path, cfg: AiConfig, keyterms: list[str]) -> dict:
+    model = cfg.stt_model or "nova-3"
+    root = cfg.stt_url or PROVIDERS["deepgram"]["stt_url"]
+    full = _deepgram_params(model, keyterms, True)
+    url = root + "?" + urllib.parse.urlencode(full)
+    status, text = _post_raw(url, audio, cfg.stt_label, "Authorization", f"Token {cfg.stt_key}", "audio/mpeg")
+    if status == 400:
+        plain = _deepgram_params(model, [], False)
+        url = root + "?" + urllib.parse.urlencode(plain)
+        status, text = _post_raw(url, audio, cfg.stt_label, "Authorization", f"Token {cfg.stt_key}", "audio/mpeg")
+    return _deepgram_shape(_read_stt_payload(status, text, cfg.stt_label, cfg.stt_key_url))
+
+
+def _eleven_shape(payload: dict) -> dict:
+    words = []
+    for word in payload.get("words") or []:
+        if not isinstance(word, dict):
+            continue
+        if word.get("type") not in (None, "word"):
+            continue
+        piece = str(word.get("text") or "").strip()
+        if not piece:
+            continue
+        words.append({
+            "text": piece,
+            "start": _seconds(word.get("start")),
+            "speaker": word.get("speaker_id"),
+        })
+    return {"text": str(payload.get("text") or "").strip(), "words": words}
+
+
+def _eleven_chunk(audio: Path, cfg: AiConfig, keyterms: list[str]) -> dict:
+    model = cfg.stt_model or "scribe_v2"
+    fields = [
+        ("model_id", model),
+        ("language_code", "es"),
+        ("timestamps_granularity", "word"),
+        ("diarize", "true"),
+    ]
+    for term in keyterms:
+        cleaned = term.strip()
+        if cleaned:
+            fields.append(("keyterms", cleaned[:50]))
+    status, text = _post_multipart(
+        cfg.stt_url, fields, audio, cfg.stt_key, cfg.stt_label, cfg.stt_key_url, auth="xi",
+    )
+    if status == 400:
+        status, text = _post_multipart(
+            cfg.stt_url,
+            [("model_id", model), ("language_code", "es")],
+            audio,
+            cfg.stt_key,
+            cfg.stt_label,
+            cfg.stt_key_url,
+            auth="xi",
+        )
+    return _eleven_shape(_read_stt_payload(status, text, cfg.stt_label, cfg.stt_key_url))
+
+
+def _assembly_shape(payload: dict) -> dict:
+    words = []
+    for word in payload.get("words") or []:
+        if not isinstance(word, dict):
+            continue
+        piece = str(word.get("text") or "").strip()
+        if not piece:
+            continue
+        words.append({
+            "text": piece,
+            "start": _seconds(word.get("start")) / 1000.0,
+            "speaker": word.get("speaker"),
+        })
+    return {"text": str(payload.get("text") or "").strip(), "words": words}
+
+
+def _assembly_chunk(audio: Path, cfg: AiConfig) -> dict:
+    root = (cfg.stt_url or PROVIDERS["assemblyai"]["stt_url"]).rstrip("/")
+    status, text = _post_raw(
+        root + "/v2/upload", audio, cfg.stt_label, "authorization", cfg.stt_key, "application/octet-stream",
+    )
+    uploaded = _read_stt_payload(status, text, cfg.stt_label, cfg.stt_key_url)
+    audio_url = str(uploaded.get("upload_url") or "")
+    if not audio_url.startswith("https://"):
+        raise AppError("AssemblyAI no recibió el audio.")
+    model = cfg.stt_model or "universal-3-5-pro"
+    created = _post_json(
+        root + "/v2/transcript",
+        {"audio_url": audio_url, "speech_models": [model], "language_codes": ["es"]},
+        cfg.stt_key,
+        120,
+        cfg.stt_label,
+        cfg.stt_key_url,
+        auth="raw",
+    )
+    job = str(created.get("id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", job):
+        raise AppError("AssemblyAI no empezó la transcripción.")
+    deadline = time.monotonic() + 30 * 60
+    while time.monotonic() < deadline:
+        payload = _get_json(
+            f"{root}/v2/transcript/{job}", cfg.stt_key, 60, cfg.stt_label, cfg.stt_key_url, auth="raw",
+        )
+        state = str(payload.get("status") or "")
+        if state == "completed":
+            return _assembly_shape(payload)
+        if state == "error":
+            detail = str(payload.get("error") or "no completó el audio")[:300]
+            raise AppError(f"AssemblyAI no transcribió: {detail}")
+        time.sleep(3)
+    raise AppError("AssemblyAI tardó demasiado. Pulsa Reintentar.")
+
+
 def transcribe(audio: Path, keyterms: list[str], cfg: AiConfig) -> dict:
     if cfg.stt_kind == "grok":
         payload = _transcribe_grok(audio, keyterms, cfg)
@@ -1317,6 +1582,12 @@ def transcribe(audio: Path, keyterms: list[str], cfg: AiConfig) -> dict:
         return _transcribe_chunked(audio, cfg, 8 * 1024 * 1024, lambda path: _gemini_chunk(path, cfg))
     if cfg.stt_kind == "openai":
         return _transcribe_chunked(audio, cfg, 18 * 1024 * 1024, lambda path: _openai_chunk(path, cfg, keyterms))
+    if cfg.stt_kind == "deepgram":
+        return _transcribe_chunked(audio, cfg, 80 * 1024 * 1024, lambda path: _deepgram_chunk(path, cfg, keyterms))
+    if cfg.stt_kind == "elevenlabs":
+        return _transcribe_chunked(audio, cfg, 80 * 1024 * 1024, lambda path: _eleven_chunk(path, cfg, keyterms))
+    if cfg.stt_kind == "assemblyai":
+        return _transcribe_chunked(audio, cfg, 200 * 1024 * 1024, lambda path: _assembly_chunk(path, cfg))
     raise AppError(f"{cfg.stt_label} no transcribe audio.")
 
 
@@ -3065,6 +3336,44 @@ def self_test() -> None:
     assert groq_cfg.chat_vision is False
     assert groq_cfg.stt_model == "whisper-large-v3-turbo"
     assert groq_cfg.stt_kind == "openai"
+    heard_dg = _deepgram_shape({
+        "results": {"channels": [{"alternatives": [{
+            "transcript": "hola clase",
+            "words": [{"word": "hola", "punctuated_word": "hola", "start": 1.5}],
+        }]}]},
+    })
+    assert heard_dg["text"] == "hola clase"
+    assert heard_dg["words"][0]["start"] == 1.5
+    heard_xi = _eleven_shape({
+        "text": "hola clase",
+        "words": [
+            {"text": "hola", "start": 0.2, "type": "word", "speaker_id": "speaker_0"},
+            {"text": " ", "start": 0.4, "type": "spacing"},
+        ],
+    })
+    assert heard_xi["words"][0]["text"] == "hola"
+    assert len(heard_xi["words"]) == 1
+    heard_aa = _assembly_shape({"text": "hola", "words": [{"text": "hola", "start": 1500, "speaker": "A"}]})
+    assert heard_aa["words"][0]["start"] == 1.5
+    voice = [row["id"] for row in provider_catalog() if row.get("hears") and not row.get("explains")]
+    assert voice == ["deepgram", "assemblyai", "elevenlabs"]
+    try:
+        merge_settings({"chat_provider": "openai", "chat_key": "sk"}, {"chat_provider": "deepgram", "chat_key": "dg"})
+        raise AssertionError("Deepgram no explica")
+    except AppError as exc:
+        assert "solo transcribe" in str(exc)
+    dg_cfg = config_for_job({
+        "chat_provider": "openai",
+        "chat_key": "sk-test",
+        "chat_model": "gpt-4.1",
+        "stt_provider": "deepgram",
+        "stt_key": "dg-test",
+    })
+    assert dg_cfg.stt_kind == "deepgram"
+    assert dg_cfg.stt_model == "nova-3"
+    assert dg_cfg.stt_url == "https://api.deepgram.com/v1/listen"
+    assert "keyterm" in urllib.parse.urlencode(_deepgram_params("nova-3", ["Penfield"], True))
+    assert _deepgram_params("nova-2", [], False)[-1] == ("language", "es")
 
     ffmpeg_bin()
     with tempfile.TemporaryDirectory() as tmp:

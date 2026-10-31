@@ -376,7 +376,7 @@ async function chooseFondo(fondo) {
 
 function providerOptions(providers, hearOnly) {
   return (providers || [])
-    .filter((item) => !hearOnly || item.hears)
+    .filter((item) => (hearOnly ? item.hears : item.explains !== false))
     .map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`)
     .join("");
 }
@@ -441,6 +441,8 @@ function openConfig() {
           <label for="cfg-stt-base">URL para transcribir</label>
           <input id="cfg-stt-base" type="text" placeholder="https://tu-servidor/v1" autocomplete="off">
         </div>
+        <p class="note span-2" id="cfg-stt-note"></p>
+        <p class="span-2" id="cfg-stt-link-row"><a id="cfg-stt-link" href="" target="_blank" rel="noreferrer">Dónde sacar la clave de la voz</a></p>
       </div>
       <div class="row">
         <button class="primary" id="cfg-save" type="button">Guardar</button>
@@ -554,6 +556,19 @@ function syncConfig() {
   document.querySelector("#cfg-note").textContent = spec.note || "";
   document.querySelector("#cfg-stt-key-row").hidden = sttId === "same";
   document.querySelector("#cfg-stt-base-row").hidden = sttId !== "compatible";
+  const voiceSpec = sttId === "same" ? null : (providers.find((item) => item.id === sttId) || null);
+  const voiceNote = document.querySelector("#cfg-stt-note");
+  const voiceRow = document.querySelector("#cfg-stt-link-row");
+  const voiceLink = document.querySelector("#cfg-stt-link");
+  if (voiceNote) voiceNote.textContent = voiceSpec && voiceSpec.note ? voiceSpec.note : "";
+  if (voiceRow && voiceLink) {
+    if (voiceSpec && voiceSpec.key_url) {
+      voiceRow.hidden = false;
+      voiceLink.href = voiceSpec.key_url;
+    } else {
+      voiceRow.hidden = true;
+    }
+  }
   const link = document.querySelector("#cfg-link");
   if (spec.key_url) {
     link.hidden = false;

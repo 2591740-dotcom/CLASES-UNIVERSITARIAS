@@ -876,6 +876,48 @@ html[data-fondo="oscuro"] .top {
 
 html[data-fondo="oscuro"] #config:not([hidden]) {
   background: rgba(0, 0, 0, 0.72);
+  color: #f7f4ee;
+}
+
+html[data-fondo="oscuro"] #config .panel,
+html[data-fondo="oscuro"] #config .config-bar {
+  background: #171717;
+  color: #f7f4ee;
+}
+
+html[data-fondo="oscuro"] #config h2,
+html[data-fondo="oscuro"] #config p {
+  color: #f7f4ee;
+}
+
+html[data-fondo="oscuro"] #config label,
+html[data-fondo="oscuro"] #config .note {
+  color: #d9d0c5;
+}
+
+html[data-fondo="oscuro"] #config select,
+html[data-fondo="oscuro"] #config input,
+html[data-fondo="oscuro"] #config textarea,
+html[data-fondo="oscuro"] #config option {
+  background: #141414;
+  color: #f7f4ee;
+  border-color: #2e2e2e;
+  caret-color: #f7f4ee;
+}
+
+html[data-fondo="oscuro"] #config input::placeholder {
+  color: #b7aea3;
+}
+
+html[data-fondo="oscuro"] #config .ghost {
+  background: transparent;
+  color: #f7f4ee;
+  border-color: #2e2e2e;
+}
+
+html[data-fondo="oscuro"] #config .primary {
+  background: #f7f4ee;
+  color: #111111;
 }
 
 html[data-fondo="oscuro"] input,

@@ -522,6 +522,9 @@
     { id: "mistral", label: "Mistral", hears: true, vision: true, default_model: "pixtral-large-latest", default_stt_model: "voxtral-mini-transcribe-3", key_url: "https://console.mistral.ai", note: "Pixtral mira las diapositivas y Voxtral transcribe." },
     { id: "groq", label: "Groq", hears: true, vision: false, default_model: "llama-3.3-70b-versatile", default_stt_model: "whisper-large-v3-turbo", key_url: "https://console.groq.com/keys", note: "Whisper transcribe. Este chat no recibe las diapositivas. Para que las mire, usa Grok, OpenAI, Gemini, Claude o Mistral." },
     { id: "openrouter", label: "OpenRouter", hears: false, vision: true, default_model: "openai/gpt-4.1", default_stt_model: "", key_url: "https://openrouter.ai/keys", note: "No transcribe. Elige abajo quién oye la clase. El modelo se escribe como proveedor/modelo." },
+    { id: "deepgram", label: "Deepgram", explains: false, hears: true, vision: false, default_model: "", default_stt_model: "nova-3", key_url: "https://console.deepgram.com", note: "Solo transcribe. Arriba elige quién explica y pega aquí la clave de Deepgram. El modelo nova-3 oye español." },
+    { id: "assemblyai", label: "AssemblyAI", explains: false, hears: true, vision: false, default_model: "", default_stt_model: "universal-3-5-pro", key_url: "https://www.assemblyai.com/dashboard/home", note: "Solo transcribe. Arriba elige quién explica y pega aquí la clave de AssemblyAI." },
+    { id: "elevenlabs", label: "ElevenLabs", explains: false, hears: true, vision: false, default_model: "", default_stt_model: "scribe_v2", key_url: "https://elevenlabs.io/app/settings/api-keys", note: "Solo transcribe. Arriba elige quién explica y pega aquí la clave de ElevenLabs." },
     { id: "compatible", label: "Otro (compatible con OpenAI)", hears: true, vision: true, default_model: "", default_stt_model: "", key_url: "", note: "Pega una URL compatible con OpenAI, por ejemplo https://tu-servidor/v1." },
   ];
 
@@ -595,7 +598,9 @@
     const chatProvider = has("chat_provider")
       ? String(incoming.chat_provider || previousChat || "openai")
       : (previousChat || "openai");
-    if (!phoneProviders.some((item) => item.id === chatProvider)) throw new Error("Ese proveedor no está en la lista.");
+    const chatSpec = phoneProviders.find((item) => item.id === chatProvider);
+    if (!chatSpec) throw new Error("Ese proveedor no está en la lista.");
+    if (chatSpec.explains === false) throw new Error(chatSpec.label + " solo transcribe. Elige otro para explicar y pon su clave en la voz.");
     const previousStt = String(current.stt_provider || "same");
     const sttProvider = has("stt_provider") ? String(incoming.stt_provider || "same") : previousStt;
     if (sttProvider !== "same") {
@@ -682,6 +687,10 @@
     if (!ia || !ia.chat_key) {
       throw new Error("Pega la clave en Configurar.");
     }
+    const spec = phoneProviders.find((item) => item.id === ia.chat_provider);
+    if (spec && spec.explains === false) {
+      throw new Error(spec.label + " solo transcribe. Elige en Configurar quién explica.");
+    }
     const url = chatEndpoint(ia);
     if (!url) throw new Error("Ese proveedor responde desde la computadora.");
     const anthropic = ia.chat_provider === "claude";
@@ -709,7 +718,6 @@
       }
     });
     messages.push({ role: "user", content: message });
-    const spec = phoneProviders.find((item) => item.id === ia.chat_provider);
     const model = ia.chat_model || (spec && spec.default_model) || "gpt-4.1";
     const data = anthropic
       ? await postJson(url, {
