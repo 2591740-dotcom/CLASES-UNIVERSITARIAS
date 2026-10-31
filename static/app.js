@@ -299,32 +299,66 @@ function fondoControl(value) {
   </span>`;
 }
 
-function renderKey(status) {
-  setup = status || {};
-  applyFondo(setup.fondo);
-  const chat = setup.chat || {};
-  const label = chat.label || "IA";
-  const model = chat.model ? ` · ${chat.model}` : "";
-  const note = setup.ready ? `${label}${model}` : (setup.missing || "Elige un proveedor");
+function fondoActual() {
+  if (setup && (setup.fondo === "oscuro" || setup.fondo === "claro")) return setup.fondo;
+  return document.documentElement.getAttribute("data-fondo") === "oscuro" ? "oscuro" : "claro";
+}
+
+function aplicacionAbierta() {
+  if (window.claseClaraCloud) return Boolean(window.CLASECLARA_DENTRO);
+  return true;
+}
+
+function renderChrome() {
+  const dentro = aplicacionAbierta();
   const onPhone = phoneApp();
-  keybar.innerHTML = `<span class="note">${esc(note)}</span>${fondoControl(setup.fondo)}${onPhone ? "" : `<button class="texty" id="open-config" type="button">Configurar</button>`}`;
+  const config = dentro && !onPhone
+    ? `<button class="texty" id="open-config" type="button">Configurar</button>`
+    : "";
+  const salir = dentro && window.claseClaraCloud
+    ? `<button class="texty" id="salir-cuenta" type="button" aria-label="Salir de la cuenta">Salir</button>`
+    : "";
+  keybar.innerHTML = `${config}${salir}${fondoControl(fondoActual())}`;
   document.querySelector("#fondo-claro").onclick = () => chooseFondo("claro");
   document.querySelector("#fondo-oscuro").onclick = () => chooseFondo("oscuro");
-  let config = document.querySelector("#open-config");
+  const top = document.querySelector(".top");
+  const configEnCabecera = () => [...top.children].find((el) => el.id === "open-config");
   if (onPhone) {
-    if (!config || config.parentElement !== document.querySelector(".top")) {
-      config?.remove();
-      document.querySelector(".top").insertAdjacentHTML("afterbegin", `<button class="texty" id="open-config" type="button">Configurar</button>`);
-      config = document.querySelector("#open-config");
+    if (dentro && !configEnCabecera()) {
+      top.insertAdjacentHTML("afterbegin", `<button class="texty" id="open-config" type="button">Configurar</button>`);
     }
+    if (!dentro) configEnCabecera()?.remove();
   }
-  if (config) config.onclick = openConfig;
+  const configBtn = document.querySelector("#open-config");
+  if (configBtn) configBtn.onclick = openConfig;
+  const salirBtn = document.querySelector("#salir-cuenta");
+  if (salirBtn) salirBtn.onclick = salirCuenta;
+}
+
+function renderKey(status) {
+  setup = status || {};
+  if (setup.fondo === "oscuro" || setup.fondo === "claro") applyFondo(setup.fondo);
+  renderChrome();
+}
+
+function salirCuenta() {
+  stopSpeech();
+  stopPoll();
+  closeWikiPeek();
+  cerrarCursoModal();
+  closeConfig();
+  window.claseClaraCloud.salir();
 }
 
 async function chooseFondo(fondo) {
-  const previous = (setup && setup.fondo) === "oscuro" ? "oscuro" : "claro";
+  const previous = fondoActual();
   if (fondo === previous) return;
   applyFondo(fondo);
+  if (setup) setup.fondo = fondo;
+  if (window.claseClaraCloud && !window.CLASECLARA_DENTRO) {
+    renderChrome();
+    return;
+  }
   try {
     const status = await api("/api/settings", {
       method: "POST",
@@ -334,6 +368,8 @@ async function chooseFondo(fondo) {
     renderKey(status);
   } catch (error) {
     applyFondo(previous);
+    if (setup) setup.fondo = previous;
+    renderChrome();
     alert(error.message);
   }
 }
@@ -2650,5 +2686,7 @@ function startClaseClara() {
   });
 }
 
+window.renderChrome = renderChrome;
 window.startClaseClara = startClaseClara;
+renderChrome();
 if (!window.CLASECLARA_HOLD) startClaseClara();

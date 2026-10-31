@@ -58,7 +58,7 @@ button { cursor: pointer; }
   font-size: 14px;
 }
 
-#keybar { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+#keybar { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
 
 #keybar input {
   width: 220px;
@@ -420,7 +420,10 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 .phone-app .top {
   padding: 4px 8px 6px 4px;
   gap: 8px;
+  flex-wrap: nowrap;
 }
+
+.phone-app .brand { flex: 1; min-width: 0; }
 
 .phone-app #open-config {
   flex: none;
@@ -775,10 +778,18 @@ body.seeing-frame { overflow: hidden; }
 }
 
 @media (max-width: 900px) {
-  .top { flex-wrap: wrap; align-items: center; padding: 8px 10px; gap: 8px; }
-  .brand { font-size: 20px; }
+  .top { flex-wrap: nowrap; align-items: center; padding: 8px 10px; gap: 8px; }
+  .brand {
+    font-size: 18px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .tag { display: none; }
   #keybar { margin-left: auto; width: auto; flex-wrap: nowrap; gap: 6px; }
+  #keybar .texty, .fondo .texty { padding: 6px 10px; }
   #keybar .note { display: none; }
   #rename-open { display: inline-flex; }
   #rename:not(.open) { display: none; }

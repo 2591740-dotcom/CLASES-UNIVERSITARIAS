@@ -865,6 +865,7 @@
     crearCurso,
     renombrarCurso,
     asignarCurso,
+    salir,
   };
 
   const cursoStore = "cc-curso";
@@ -1044,6 +1045,36 @@
     clearSession();
   }
 
+  function correoGuardado() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(cuentaKey) || "null");
+      return parsed && parsed.email ? String(parsed.email) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function salir() {
+    const saved = readCuenta();
+    clearSession();
+    const email = correoGuardado();
+    if (email) {
+      localStorage.setItem(cuentaKey, JSON.stringify({
+        email,
+        clave: "",
+        universidad: saved ? saved.universidad : "",
+        carrera: saved ? saved.carrera : "",
+      }));
+    } else {
+      localStorage.removeItem(cuentaKey);
+    }
+    window.CLASECLARA_ESTUDIO = null;
+    window.CLASECLARA_CURSOS = null;
+    window.CLASECLARA_DENTRO = false;
+    window.CLASECLARA_HOLD = true;
+    showLanding("entrar");
+  }
+
   function rememberSession(data) {
     access = data.access_token;
     localStorage.setItem(sessionKey, JSON.stringify({
@@ -1058,6 +1089,7 @@
     window.CLASECLARA_ESTUDIO = saved && saved.universidad
       ? { universidad: saved.universidad, carrera: saved.carrera }
       : null;
+    window.CLASECLARA_DENTRO = true;
     window.CLASECLARA_HOLD = false;
     window.startClaseClara?.();
   }
@@ -1122,6 +1154,8 @@
         <p class="note" id="gate-error" hidden></p>
       </section>`;
     document.querySelector("#gate-check").onclick = () => checkSaved();
+    window.CLASECLARA_DENTRO = false;
+    window.renderChrome?.();
     document.querySelector("#gate-other").onclick = () => {
       clearCuenta();
       showLanding("entrar");
@@ -1132,7 +1166,7 @@
     const root = document.querySelector("#app");
     if (!root) return;
     const crear = mode === "crear";
-    const saved = readCuenta();
+    const correo = correoGuardado();
     root.innerHTML = `
       <section class="hero">
         <p class="kicker">ClaseClara</p>
@@ -1142,7 +1176,7 @@
       <section class="panel gate">
         <h2>${crear ? "Crear cuenta" : "Entrar"}</h2>
         <label for="gate-email">Correo</label>
-        <input id="gate-email" type="email" autocomplete="username" value="${escGate(saved ? saved.email : "")}">
+        <input id="gate-email" type="email" autocomplete="username" value="${escGate(correo)}">
         <label for="gate-pass">Contraseña</label>
         <div class="pass-line">
           <input id="gate-pass" type="password" autocomplete="${crear ? "new-password" : "current-password"}" autocapitalize="off" spellcheck="false">
@@ -1208,6 +1242,8 @@
         button.disabled = false;
       }
     };
+    window.CLASECLARA_DENTRO = false;
+    window.renderChrome?.();
   }
 
   async function checkSaved() {
