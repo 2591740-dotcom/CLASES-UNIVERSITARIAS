@@ -2875,6 +2875,51 @@ function cleanSpeech(value) {
   return String(value ?? "").replace(/[*_`#>]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function decirMinuto(stamp) {
+  const parts = String(stamp || "").trim().split(":");
+  if (parts.length < 2 || parts.length > 3) return "";
+  const numbers = parts.map((part) => Number(part));
+  if (numbers.some((part) => !Number.isInteger(part) || part < 0)) return "";
+  let hours = 0;
+  let minutes = 0;
+  let seconds = 0;
+  if (parts.length === 3) {
+    hours = numbers[0];
+    minutes = numbers[1];
+    seconds = numbers[2];
+    if (hours > 99 || minutes > 59 || seconds > 59) return "";
+  } else {
+    seconds = numbers[1];
+    if (seconds > 59 || numbers[0] > 59 * 99) return "";
+    hours = Math.floor(numbers[0] / 60);
+    minutes = numbers[0] % 60;
+  }
+  if (!hours && !minutes && !seconds) return "el comienzo";
+  const bits = [];
+  if (hours) bits.push(hours === 1 ? "1 hora" : `${hours} horas`);
+  if (minutes) bits.push(minutes === 1 ? "1 minuto" : `${minutes} minutos`);
+  if (seconds) bits.push(seconds === 1 ? "1 segundo" : `${seconds} segundos`);
+  if (bits.length === 1) return bits[0];
+  if (bits.length === 2) return `${bits[0]} y ${bits[1]}`;
+  return `${bits[0]}, ${bits[1]} y ${bits[2]}`;
+}
+
+function fraseMinuto(stamp) {
+  const said = decirMinuto(stamp);
+  if (!said) return "";
+  if (said === "el comienzo") return "Al comienzo del video.";
+  return said.startsWith("1 hora") ? `A la ${said} del video.` : `A los ${said} del video.`;
+}
+
+function hablarTiempos(text) {
+  return String(text || "").replace(/\d{1,2}:\d{2}(?::\d{2})?/g, (stamp, offset, source) => {
+    const before = offset > 0 ? source[offset - 1] : "";
+    const after = source[offset + stamp.length] || "";
+    if (/\d/.test(before) || /\d/.test(after)) return stamp;
+    return decirMinuto(stamp) || stamp;
+  });
+}
+
 function speechFor(tab, data) {
   const study = data?.study || {};
   if (tab === "avisos") {
@@ -2890,14 +2935,17 @@ function speechFor(tab, data) {
     if (study.dificil) parts.push(`Para entenderlo. ${cleanSpeech(study.dificil)}`);
     const times = topicTimes(study, data.frames, data.lines);
     (study.explicacion || []).forEach((part, index) => {
-      const when = times[index] ? `En el video, minuto ${times[index]}.` : "";
+      const when = fraseMinuto(times[index]);
       const block = [when, part.titulo, part.texto, part.ejemplo ? `Ejemplo. ${part.ejemplo}` : ""].map(cleanSpeech).filter(Boolean).join(". ");
       if (block) parts.push(block);
     });
     return parts.join("\n");
   }
   if (tab === "resumen") {
-    const points = (study.puntos || []).map((point) => cleanSpeech(`${point.tiempo ? `Minuto ${point.tiempo}. ` : ""}${point.texto || ""}`));
+    const points = (study.puntos || []).map((point) => {
+      const when = fraseMinuto(point.tiempo);
+      return cleanSpeech(`${when ? `${when} ` : ""}${point.texto || ""}`);
+    });
     return [cleanSpeech(study.resumen), ...points].filter(Boolean).join("\n");
   }
   if (tab === "esquema") {
@@ -2924,7 +2972,7 @@ function speechFor(tab, data) {
   if (tab === "capturas") {
     return (data.frames || []).map((frame, index) => {
       const note = frameNote(study, index);
-      return cleanSpeech(`Minuto ${durationStamp(frame.time)}. ${note?.que_muestra || "Captura de la clase"}. ${note?.por_que_importa || ""}`);
+      return cleanSpeech(`${fraseMinuto(durationStamp(frame.time))} ${note?.que_muestra || "Captura de la clase"}. ${note?.por_que_importa || ""}`);
     }).filter(Boolean).join("\n");
   }
   if (tab === "links") {
@@ -3201,7 +3249,8 @@ function startSpeech() {
   const tab = document.querySelector("[data-tab][aria-selected='true']")?.dataset.tab || "";
   const reader = phoneReader();
   const mobileBrowser = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
-  const chunks = speechChunks(speechFor(tab, clase), reader ? 380 : (mobileBrowser ? 140 : 900));
+  const leido = speechFor(tab, clase);
+  const chunks = speechChunks(tab === "texto" ? leido : hablarTiempos(leido), reader ? 380 : (mobileBrowser ? 140 : 900));
   if (!chunks.length) {
     listenNote("Esta parte no tiene texto para leer.");
     return;
