@@ -3049,6 +3049,9 @@ let speechToggleAt = 0;
 let phoneSpeech = null;
 let speechKeepSrc = "";
 let speechKeepAudio = null;
+let speechKeepCtx = null;
+let speechKeepOsc = null;
+let speechRestart = null;
 const SPEECH_RATES = [1, 1.25, 1.5, 2];
 
 function speechRate() {
@@ -3088,8 +3091,14 @@ window.speechSynthesis?.addEventListener?.("voiceschanged", primeVoices);
 
 function phoneReader() {
   const cap = window.Capacitor;
-  const native = Boolean(window.androidBridge || (cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform()));
-  if (!native || !cap || typeof cap.registerPlugin !== "function") return null;
+  const injected = cap && cap.Plugins && cap.Plugins.ClaseClaraSpeech;
+  if (injected && typeof injected.speak === "function" && typeof injected.stop === "function") {
+    phoneSpeech = injected;
+    return phoneSpeech;
+  }
+  if (!cap || typeof cap.registerPlugin !== "function") return null;
+  const native = Boolean(window.androidBridge || (typeof cap.isNativePlatform === "function" && cap.isNativePlatform()));
+  if (!native) return null;
   if (!phoneSpeech) phoneSpeech = cap.registerPlugin("ClaseClaraSpeech");
   return phoneSpeech;
 }
@@ -3154,7 +3163,39 @@ function speechKeepWav() {
   return speechKeepSrc;
 }
 
+function holdSpeechTone() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!speechKeepCtx) {
+      speechKeepCtx = new AudioCtx();
+      const osc = speechKeepCtx.createOscillator();
+      const gain = speechKeepCtx.createGain();
+      osc.frequency.value = 140;
+      osc.type = "sine";
+      gain.gain.value = 0.004;
+      osc.connect(gain);
+      gain.connect(speechKeepCtx.destination);
+      osc.start();
+      speechKeepOsc = osc;
+    }
+    if (speechKeepCtx.state !== "running") {
+      const again = speechKeepCtx.resume();
+      if (again && again.catch) again.catch(() => {});
+    }
+  } catch { /* el navegador no sostiene el audio */ }
+}
+
+function releaseSpeechTone() {
+  try { if (speechKeepOsc) speechKeepOsc.stop(); } catch { /* el tono ya se detuvo */ }
+  speechKeepOsc = null;
+  const ctx = speechKeepCtx;
+  speechKeepCtx = null;
+  try { if (ctx) ctx.close(); } catch { /* el audio ya se cerró */ }
+}
+
 function holdSpeechAlive() {
+  holdSpeechTone();
   try {
     if (!speechKeepAudio) {
       speechKeepAudio = new Audio(speechKeepWav());
@@ -3164,10 +3205,12 @@ function holdSpeechAlive() {
       speechKeepAudio.volume = 0.08;
       speechKeepAudio.addEventListener("timeupdate", () => {
         if (document.querySelector("#listen")?.getAttribute("aria-pressed") !== "true") return;
+        holdSpeechTone();
         const synth = window.speechSynthesis;
         if (synth && synth.paused) {
           try { synth.resume(); } catch { /* la voz sigue */ }
         }
+        if (document.hidden && typeof speechRestart === "function") speechRestart();
         if (!speechKeepAudio.paused) return;
         const again = speechKeepAudio.play();
         if (again && again.catch) again.catch(() => {});
@@ -3192,6 +3235,7 @@ function holdSpeechAlive() {
 }
 
 function releaseSpeechAlive() {
+  releaseSpeechTone();
   try {
     if (speechKeepAudio) {
       speechKeepAudio.pause();
@@ -3209,6 +3253,7 @@ function releaseSpeechAlive() {
 
 function stopSpeech() {
   speechToken += 1;
+  speechRestart = null;
   clearInterval(speechPulse);
   releaseSpeechAlive();
   try { window.speechSynthesis?.cancel(); } catch { /* la voz ya se detuvo */ }
@@ -3222,13 +3267,16 @@ function stopSpeech() {
 
 function resumeHiddenSpeech() {
   if (document.querySelector("#listen")?.getAttribute("aria-pressed") !== "true") return;
+  holdSpeechTone();
   const synth = window.speechSynthesis;
   if (synth && synth.paused) {
     try { synth.resume(); } catch { /* la voz sigue */ }
   }
-  if (!speechKeepAudio || !speechKeepAudio.paused) return;
-  const again = speechKeepAudio.play();
-  if (again && again.catch) again.catch(() => {});
+  if (speechKeepAudio && speechKeepAudio.paused) {
+    const again = speechKeepAudio.play();
+    if (again && again.catch) again.catch(() => {});
+  }
+  if (document.hidden && typeof speechRestart === "function") speechRestart();
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -3325,7 +3373,9 @@ async function startPhoneSpeech(reader, chunks) {
   };
   let handle = null;
   try {
-    reader.addListener("piece", onPiece).then((next) => { handle = next; }).catch(() => {});
+    const added = reader.addListener("piece", onPiece);
+    if (added && typeof added.then === "function") added.then((next) => { handle = next; }).catch(() => {});
+    else handle = added;
   } catch { /* la voz sigue sin avisar el tramo */ }
   try {
     while (index < chunks.length) {
@@ -3354,10 +3404,16 @@ async function startPhoneSpeech(reader, chunks) {
 function startBrowserSpeech(synth, chunks) {
   const token = ++speechToken;
   markListening();
-  if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "")) holdSpeechAlive();
+  const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  if (mobile) holdSpeechAlive();
   let index = 0;
   let nudgeUntil = 0;
   let fastFails = 0;
+  let generation = 0;
+  let spokenAt = 0;
+  let pieceOpen = false;
+  let pieceUntil = 0;
+  let restarting = false;
   const android = /Android/i.test(navigator.userAgent || "");
   clearInterval(speechPulse);
   const speakNext = () => {
@@ -3367,6 +3423,8 @@ function startBrowserSpeech(synth, chunks) {
       return;
     }
     const pace = speechPace;
+    generation += 1;
+    const mine = generation;
     const utterance = new SpeechSynthesisUtterance(chunks[index]);
     const voice = spanishVoice();
     utterance.lang = voice?.lang || "es-ES";
@@ -3375,28 +3433,46 @@ function startBrowserSpeech(synth, chunks) {
     utterance.rate = speechRate();
     let settled = false;
     const started = Date.now();
+    spokenAt = started;
+    pieceOpen = false;
     const seconds = utterance.text.length / (10 * Math.max(utterance.rate || 1, 0.5));
+    pieceUntil = seconds * 1000;
     const watch = setTimeout(() => {
-      if (settled || token !== speechToken) return;
+      if (settled || token !== speechToken || mine !== generation) return;
+      if (document.hidden) return;
       settled = true;
       try { synth.cancel(); } catch { /* el navegador no avisó que terminó */ }
       index += 1;
       setTimeout(speakNext, 50);
     }, Math.min(180000, Math.max(8000, seconds * 1000 + 5000)));
     const advance = (delay) => {
-      if (settled || token !== speechToken) return;
+      if (settled || token !== speechToken || mine !== generation) return;
       settled = true;
       clearTimeout(watch);
+      pieceOpen = false;
+      spokenAt = Date.now();
       index += 1;
       if (delay) setTimeout(speakNext, delay);
       else speakNext();
     };
     const finish = (error) => {
-      if (settled || token !== speechToken) return;
+      if (settled || token !== speechToken || mine !== generation) return;
       if (pace !== speechPace) {
         settled = true;
         clearTimeout(watch);
+        pieceOpen = false;
         speakNext();
+        return;
+      }
+      if ((error === "interrupted" || error === "canceled") && document.hidden) {
+        settled = true;
+        clearTimeout(watch);
+        pieceOpen = false;
+        spokenAt = 0;
+        setTimeout(() => {
+          if (token !== speechToken || mine !== generation) return;
+          if (typeof speechRestart === "function") speechRestart();
+        }, 350);
         return;
       }
       if (error === "interrupted" || error === "canceled") {
@@ -3426,15 +3502,46 @@ function startBrowserSpeech(synth, chunks) {
       }
       advance(0);
     };
+    utterance.onstart = () => {
+      if (mine !== generation) return;
+      pieceOpen = true;
+      spokenAt = Date.now();
+      fastFails = 0;
+    };
     utterance.onend = () => finish("");
     utterance.onerror = (event) => finish((event && event.error) || "error");
     try { synth.resume(); } catch { /* sigue con la voz */ }
-    synth.speak(utterance);
+    try { synth.speak(utterance); } catch { finish("error"); }
   };
+  if (mobile) {
+    speechRestart = () => {
+      if (token !== speechToken || !document.hidden || restarting) return;
+      if (synth.paused) {
+        try { synth.resume(); } catch { /* la voz sigue */ }
+        return;
+      }
+      if (synth.speaking) return;
+      const waited = Date.now() - spokenAt;
+      if (pieceOpen) {
+        if (waited < pieceUntil) return;
+      } else if (waited < 1200) {
+        return;
+      }
+      restarting = true;
+      pieceOpen = false;
+      generation += 1;
+      try { synth.cancel(); } catch { /* la voz se vuelve a decir */ }
+      setTimeout(() => {
+        restarting = false;
+        if (token !== speechToken) return;
+        speakNext();
+      }, 80);
+    };
+  }
   speakNext();
   if (android) return;
   speechPulse = setInterval(() => {
-    if (token !== speechToken || !synth.speaking) return;
+    if (token !== speechToken || document.hidden || !synth.speaking) return;
     nudgeUntil = Date.now() + 500;
     try {
       synth.pause();
