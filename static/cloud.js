@@ -863,10 +863,14 @@
     localStorage.setItem(cuentaKey, JSON.stringify({ email, clave }));
   }
 
-  function clearCuenta() {
-    localStorage.removeItem(cuentaKey);
+  function clearSession() {
     localStorage.removeItem(sessionKey);
     access = "";
+  }
+
+  function clearCuenta() {
+    localStorage.removeItem(cuentaKey);
+    clearSession();
   }
 
   function rememberSession(data) {
@@ -895,7 +899,7 @@
   }
 
   function gateMessage(estado) {
-    if (estado === "existe") return "Ese correo ya está anotado. Si lo borras en Supabase, se puede crear otra vez.";
+    if (estado === "existe") return "Ese correo ya está anotado. Si borras su fila en la tabla cuentas, se puede crear otra vez.";
     if (estado === "correo") return "Escribe un correo válido.";
     if (estado === "corta") return "La contraseña necesita al menos 6 caracteres.";
     if (estado === "mal") return "Ese correo y esa contraseña no coinciden.";
@@ -904,13 +908,14 @@
   }
 
   function showWaiting(email) {
+    clearSession();
     const root = document.querySelector("#app");
     if (!root) return;
     root.innerHTML = `
       <section class="hero">
         <p class="kicker">Cuenta anotada</p>
         <h1>Falta activar ${escGate(email)}.</h1>
-        <p class="lede">El correo y la contraseña quedaron guardados en este aparato. Cuando actives el correo, abre otra vez esta página y entra solo.</p>
+        <p class="lede">El correo y la contraseña quedaron guardados en este aparato. En Supabase abre Table Editor, tabla cuentas, y pon activo en true. Luego pulsa Revisar.</p>
       </section>
       <section class="panel gate">
         <div class="row">

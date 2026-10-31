@@ -45,11 +45,11 @@ En el sitio, Environment variables:
   SUPABASE_EMAIL = claseclara.app.user@gmail.com
 
 La contraseña de la app no va en Git. En la web cada persona
-crea una cuenta. El correo aparece en Supabase, Authentication,
-Users, bloqueado. Para activarlo, abre el usuario y quita el
-bloqueo. Si borras ese usuario, el mismo correo puede crear
-la cuenta otra vez. El correo y la contraseña quedan en el
-navegador de ese aparato.
+crea una cuenta. El correo aparece en Supabase, Table Editor,
+tabla cuentas, con activo en falso. Para dar permiso, pon
+activo en true. La contraseña no se guarda en esa tabla: queda
+en el navegador de ese aparato. Si borras la fila de ese correo,
+la misma persona puede crear la cuenta otra vez.
 
 La página hace lo mismo que el APK. En la computadora, en Android
 o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas
