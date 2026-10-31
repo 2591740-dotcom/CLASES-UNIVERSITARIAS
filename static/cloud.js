@@ -329,6 +329,7 @@
       id: row.id,
       title: row.titulo || "Clase",
       materia: row.materia || "",
+      curso_id: row.curso_id || "",
       status: viewStatus(estado),
       stage: stageOf(estado, row.detalle),
       detail: row.detalle || "",
@@ -372,6 +373,7 @@
     const transcript = row.transcripcion || {};
     return {
       ...card(row),
+      curso: await nombreCurso(row.curso_id),
       study: row.estudio || {},
       lines: Array.isArray(transcript.lines) ? transcript.lines : [],
       chat: Array.isArray(row.chat) ? row.chat : [],
@@ -449,12 +451,15 @@
       const titulo = (file ? file.name.replace(/\.[^.]+$/, "") : "Clase por enlace").slice(0, 140);
       const estudio = estudioActual();
       if (!estudio) throw new Error("Entra de nuevo para preparar la clase.");
+      const cursoId = readCursoId();
+      if (!esIdCurso(cursoId)) throw new Error("Elige o crea un curso.");
       await rest("POST", "/rest/v1/clases", {
         id,
         titulo,
         materia: course,
         universidad: estudio.universidad,
         carrera: estudio.carrera,
+        curso_id: cursoId,
         video_url: link || "",
         estudio: {},
         transcripcion: {},
@@ -781,14 +786,18 @@
     }
     if (url === "/api/zoom") return { recordings: [] };
     if (url === "/api/classes" && method === "GET") {
-      const rows = await rest("GET", "/rest/v1/clases?select=id,titulo,materia,universidad,carrera,duracion,estado,detalle,creado,estudio&order=creado.desc");
+      const cursos = await cursosDeEstudio();
+      const pack = publicarCursos(cursos, readCursoId());
+      if (!pack.activo) return { classes: [], cursos: pack };
+      const rows = await rest("GET", `/rest/v1/clases?select=id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio&curso_id=eq.${pack.activo}&order=creado.desc`);
       const estudio = estudioActual();
       const list = (Array.isArray(rows) ? rows : []).filter((row) => (
         estudio
         && row.universidad === estudio.universidad
         && row.carrera === estudio.carrera
+        && row.curso_id === pack.activo
       ));
-      return { classes: list.map(card) };
+      return { classes: list.map(card), cursos: pack };
     }
     if (url === "/api/classes" && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
@@ -848,7 +857,137 @@
     throw new Error("Esa acción no está en esta página.");
   }
 
-  window.claseClaraCloud = { api, saveEntry, saveYouTube };
+  window.claseClaraCloud = {
+    api,
+    saveEntry,
+    saveYouTube,
+    elegirCurso,
+    crearCurso,
+    renombrarCurso,
+    asignarCurso,
+  };
+
+  const cursoStore = "cc-curso";
+
+  function esIdCurso(id) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ""));
+  }
+
+  function estudioLlave() {
+    const estudio = estudioActual();
+    if (!estudio) return "";
+    return `${estudio.universidad}\u0000${estudio.carrera}`;
+  }
+
+  function readCursoId() {
+    try {
+      const all = JSON.parse(localStorage.getItem(cursoStore) || "{}");
+      return String((all && all[estudioLlave()]) || "");
+    } catch {
+      return "";
+    }
+  }
+
+  function writeCursoId(id) {
+    const key = estudioLlave();
+    if (!key) return;
+    let all = {};
+    try {
+      const parsed = JSON.parse(localStorage.getItem(cursoStore) || "{}");
+      if (parsed && typeof parsed === "object") all = parsed;
+    } catch { /* se vuelve a guardar solo esta carrera */ }
+    if (id) all[key] = id;
+    else delete all[key];
+    localStorage.setItem(cursoStore, JSON.stringify(all));
+  }
+
+  function cursoNombre(nombre) {
+    const text = String(nombre || "").trim().replace(/\s+/g, " ");
+    if (!text) throw new Error("Escribe el nombre del curso.");
+    if (text.length > 80) throw new Error("El nombre del curso es muy largo.");
+    return text;
+  }
+
+  function publicarCursos(rows, activo) {
+    const items = (Array.isArray(rows) ? rows : []).map((item) => ({
+      id: item.id,
+      nombre: item.nombre,
+    }));
+    const id = items.some((item) => item.id === activo) ? activo : (items[0] ? items[0].id : "");
+    writeCursoId(id);
+    const actual = items.find((item) => item.id === id);
+    const pack = { items, activo: id, nombre: actual ? actual.nombre : "" };
+    window.CLASECLARA_CURSOS = pack;
+    return pack;
+  }
+
+  async function cursosDeEstudio() {
+    const rows = await rest("GET", "/rest/v1/cursos?select=id,nombre,creado&order=creado.asc");
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  async function nombreCurso(id) {
+    if (!esIdCurso(id)) return "";
+    const pack = window.CLASECLARA_CURSOS;
+    const known = pack && Array.isArray(pack.items) ? pack.items.find((item) => item.id === id) : null;
+    if (known) return known.nombre || "";
+    const rows = await rest("GET", `/rest/v1/cursos?id=eq.${id}&select=nombre`);
+    return rows && rows[0] ? rows[0].nombre || "" : "";
+  }
+
+  function elegirCurso(id) {
+    const pack = window.CLASECLARA_CURSOS || { items: [] };
+    if (!pack.items.some((item) => item.id === id)) throw new Error("No encuentro ese curso.");
+    return publicarCursos(pack.items, id);
+  }
+
+  function errorCurso(error, fallo) {
+    if (/23505|duplicate key/i.test(String(error && error.message))) {
+      throw new Error("Ya hay un curso con ese nombre.");
+    }
+    throw new Error(fallo);
+  }
+
+  async function crearCurso(nombre) {
+    const limpio = cursoNombre(nombre);
+    const estudio = estudioActual();
+    if (!estudio) throw new Error("Entra de nuevo para crear el curso.");
+    try {
+      await rest("POST", "/rest/v1/cursos", {
+        universidad: estudio.universidad,
+        carrera: estudio.carrera,
+        nombre: limpio,
+      });
+    } catch (error) {
+      errorCurso(error, "No pude crear el curso.");
+    }
+    const rows = await cursosDeEstudio();
+    const creado = rows.find((item) => item.nombre === limpio);
+    if (!creado) throw new Error("No pude crear el curso.");
+    return publicarCursos(rows, creado.id);
+  }
+
+  async function renombrarCurso(id, nombre) {
+    if (!esIdCurso(id)) throw new Error("No encuentro ese curso.");
+    const limpio = cursoNombre(nombre);
+    try {
+      await rest("PATCH", `/rest/v1/cursos?id=eq.${id}`, { nombre: limpio });
+    } catch (error) {
+      errorCurso(error, "No pude renombrar el curso.");
+    }
+    const rows = (window.CLASECLARA_CURSOS?.items || []).map((item) => (
+      item.id === id ? { id: item.id, nombre: limpio } : item
+    ));
+    return publicarCursos(rows, readCursoId());
+  }
+
+  async function asignarCurso(classId, cursoId) {
+    if (!/^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(String(classId || ""))) {
+      throw new Error("No encuentro esa clase.");
+    }
+    if (!esIdCurso(cursoId)) throw new Error("Elige un curso.");
+    await rest("PATCH", `/rest/v1/clases?id=eq.${classId}`, { curso_id: cursoId });
+  }
 
   const cuentaKey = "cc-cuenta";
 

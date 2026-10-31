@@ -417,18 +417,21 @@ async function saveConfig() {
   }
 }
 
-function phoneHome(classes) {
+function phoneHome(classes, cursos) {
   const list = Array.isArray(classes) ? classes : [];
+  const pack = cursos || { items: [], activo: "", nombre: "" };
   const estudio = window.CLASECLARA_ESTUDIO || {};
   const ambito = estudio.universidad ? `${estudio.carrera || ""} · ${estudio.universidad}` : "";
   const mine = list.length
     ? list.map(cardHtml).join("")
-    : `<p class="empty">Todavía no hay clases${ambito ? ` de ${esc(estudio.carrera)} en ${esc(estudio.universidad)}` : ""}. Carga un video o pega el enlace de Zoom.</p>`;
+    : pack.nombre
+      ? `<p class="empty">Todavía no hay clases en ${esc(pack.nombre)}. Carga un video o pega el enlace de Zoom.</p>`
+      : `<p class="empty">Crea un curso para guardar aquí las clases${ambito ? ` de ${esc(estudio.carrera)}` : ""}.</p>`;
   return `
     <section class="hero">
       <p class="kicker">${esc(ambito || "Tu clase, en claro")}</p>
+      <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
       <h1>La misma clase, en este aparato.</h1>
-      <p class="lede">Pega el enlace de Zoom o carga el video. En la computadora, en Android y en el iPhone puedes ver el video, escuchar la clase y preguntar en el chat.</p>
     </section>
     <section class="panel">
       <div class="drop" id="drop">
@@ -439,18 +442,17 @@ function phoneHome(classes) {
         <div class="row">
           <button class="primary" id="go" type="button">Preparar clase</button>
         </div>
-        <p class="note">El video se ve en este aparato en cuanto lo cargas. La explicación, las diapositivas y el video para los demás aparatos los prepara la computadora donde ClaseClara está abierto. También puedes soltar el archivo aquí.</p>
       </div>
     </section>
-    <h2>Clases</h2>
+    <h2>${esc(pack.nombre || "Clases")}</h2>
     <div class="grid">${mine}</div>`;
 }
 
-function homeHtml(classes, recordings, status) {
+function homeHtml(classes, recordings, status, cursos) {
   const list = Array.isArray(classes) ? classes : [];
   const found = Array.isArray(recordings) ? recordings : [];
   const state = status || {};
-  if (window.claseClaraCloud) return phoneHome(list);
+  if (window.claseClaraCloud) return phoneHome(list, cursos);
   const mine = list.length
     ? list.map(cardHtml).join("")
     : '<p class="empty">Todavía no hay clases. La primera aparece aquí.</p>';
@@ -505,7 +507,151 @@ function cardHtml(item) {
     </article>`;
 }
 
+function cerrarCursoModal() {
+  document.querySelector("#course-modal")?.remove();
+  document.removeEventListener("keydown", onCursoEscape);
+}
+
+function onCursoEscape(event) {
+  if (event.key === "Escape") cerrarCursoModal();
+}
+
+function abrirCursoModal(destino) {
+  cerrarCursoModal();
+  const pack = window.CLASECLARA_CURSOS || { items: [], activo: "", nombre: "" };
+  const deClase = destino === "clase";
+  const actualId = deClase ? (clase && clase.curso_id) || "" : pack.activo;
+  const actualNombre = deClase ? (clase && clase.curso) || "" : pack.nombre;
+  const lista = pack.items.map((item) => {
+    const on = item.id === actualId ? " on" : "";
+    return `<button class="course-pick${on}" type="button" data-id="${esc(item.id)}">${esc(item.nombre)}</button>`;
+  }).join("");
+  const renombrar = actualId ? `
+    <form id="curso-renombrar">
+      <label for="curso-rename">Renombrar</label>
+      <input id="curso-rename" type="text" maxlength="80" value="${esc(actualNombre)}">
+      <button class="ghost" type="submit">Renombrar</button>
+    </form>` : "";
+  const copiar = deClase && pack.activo && pack.activo !== actualId
+    ? `<button class="ghost" id="curso-copiar" type="button">Copiar el curso de inicio</button>`
+    : "";
+  const modal = document.createElement("div");
+  modal.id = "course-modal";
+  modal.className = "course-modal";
+  modal.innerHTML = `
+    <div class="course-card" role="dialog" aria-modal="true" aria-labelledby="curso-titulo">
+      <p class="kicker" id="curso-titulo">Curso</p>
+      <div class="course-list">${lista || '<p class="empty">Todavía no hay cursos.</p>'}</div>
+      ${renombrar}
+      <form id="curso-nuevo">
+        <label for="curso-nombre">Curso nuevo</label>
+        <input id="curso-nombre" type="text" maxlength="80" placeholder="Nombre del curso">
+        <button class="primary" type="submit">Curso nuevo</button>
+      </form>
+      ${copiar}
+      <p class="error" id="curso-error" hidden></p>
+      <div class="row"><button class="ghost" id="curso-cerrar" type="button">Cerrar</button></div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.addEventListener("keydown", onCursoEscape);
+  const fallo = (error) => {
+    const note = modal.querySelector("#curso-error");
+    note.hidden = false;
+    note.textContent = error.message || "No pude guardar el curso.";
+  };
+  modal.querySelector("#curso-cerrar").onclick = cerrarCursoModal;
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) cerrarCursoModal();
+  });
+  modal.querySelectorAll(".course-pick").forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        if (deClase) {
+          await window.claseClaraCloud.asignarCurso(clase.id, button.dataset.id);
+          clase.curso_id = button.dataset.id;
+          clase.curso = button.textContent;
+          const capsula = document.querySelector("#clase-curso");
+          if (capsula) capsula.textContent = clase.curso;
+          cerrarCursoModal();
+          return;
+        }
+        window.claseClaraCloud.elegirCurso(button.dataset.id);
+        cerrarCursoModal();
+        await showHome();
+      } catch (error) {
+        fallo(error);
+        button.disabled = false;
+      }
+    };
+  });
+  const formNuevo = modal.querySelector("#curso-nuevo");
+  formNuevo.onsubmit = async (event) => {
+    event.preventDefault();
+    formNuevo.querySelector("button").disabled = true;
+    try {
+      const creado = await window.claseClaraCloud.crearCurso(modal.querySelector("#curso-nombre").value);
+      if (deClase) {
+        await window.claseClaraCloud.asignarCurso(clase.id, creado.activo);
+        clase.curso_id = creado.activo;
+        clase.curso = creado.nombre;
+        const capsula = document.querySelector("#clase-curso");
+        if (capsula) capsula.textContent = clase.curso || "Curso";
+        cerrarCursoModal();
+        return;
+      }
+      cerrarCursoModal();
+      await showHome();
+    } catch (error) {
+      fallo(error);
+      formNuevo.querySelector("button").disabled = false;
+    }
+  };
+  const formRename = modal.querySelector("#curso-renombrar");
+  if (formRename) {
+    formRename.onsubmit = async (event) => {
+      event.preventDefault();
+      formRename.querySelector("button").disabled = true;
+      try {
+        const cambiado = await window.claseClaraCloud.renombrarCurso(actualId, modal.querySelector("#curso-rename").value);
+        const nombre = (cambiado.items.find((item) => item.id === actualId) || {}).nombre || "";
+        if (deClase && clase && clase.curso_id === actualId) {
+          clase.curso = nombre;
+          const capsula = document.querySelector("#clase-curso");
+          if (capsula) capsula.textContent = nombre || "Curso";
+          cerrarCursoModal();
+          return;
+        }
+        cerrarCursoModal();
+        await showHome();
+      } catch (error) {
+        fallo(error);
+        formRename.querySelector("button").disabled = false;
+      }
+    };
+  }
+  const copiarBtn = modal.querySelector("#curso-copiar");
+  if (copiarBtn) {
+    copiarBtn.onclick = async () => {
+      copiarBtn.disabled = true;
+      try {
+        await window.claseClaraCloud.asignarCurso(clase.id, pack.activo);
+        clase.curso_id = pack.activo;
+        clase.curso = pack.nombre;
+        const capsula = document.querySelector("#clase-curso");
+        if (capsula) capsula.textContent = clase.curso || "Curso";
+        cerrarCursoModal();
+      } catch (error) {
+        fallo(error);
+        copiarBtn.disabled = false;
+      }
+    };
+  }
+  modal.querySelector("#curso-nombre").focus();
+}
+
 async function showHome() {
+  cerrarCursoModal();
   stopSpeech();
   stopPoll();
   shown = "";
@@ -519,7 +665,9 @@ async function showHome() {
   renderKey(status);
   clearYouTube();
   unbindMiniPlayer();
-  app.innerHTML = homeHtml(list.classes, zoom.recordings, status);
+  app.innerHTML = homeHtml(list.classes, zoom.recordings, status, list.cursos);
+  const capsula = document.querySelector("#curso-capsula");
+  if (capsula) capsula.onclick = () => abrirCursoModal("inicio");
   const pick = document.querySelector("#pick");
   if (pick) pick.onclick = chooseFile;
   const go = document.querySelector("#go");
@@ -696,6 +844,11 @@ function renderProcess(job) {
 }
 
 async function saveFromPhone() {
+  const pack = window.CLASECLARA_CURSOS;
+  if (!pack || !pack.activo) {
+    abrirCursoModal("inicio");
+    return;
+  }
   const link = document.querySelector("#link")?.value.trim() || "";
   const file = document.querySelector("#file")?.files?.[0] || droppedFile || null;
   droppedFile = null;
@@ -1063,6 +1216,7 @@ function studyHtml(data) {
         <div class="study-head">
           <div>
             <p class="kicker">${esc(data.materia || "Clase")} ${esc(durationLabel(data.duration))}</p>
+            ${window.claseClaraCloud ? `<button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>` : ""}
             <h1 id="class-heading">${esc(shownTitle)}</h1>
             <p class="idea">${esc(study.idea || "")}</p>
             <form id="rename" class="rename">
@@ -1844,6 +1998,8 @@ function bindMiniPlayer() {
 
 function bindStudy() {
   document.querySelector("#back").onclick = goHome;
+  const cursoClase = document.querySelector("#clase-curso");
+  if (cursoClase) cursoClase.onclick = () => abrirCursoModal("clase");
   bindMiniPlayer();
   const rename = document.querySelector("#rename");
   if (rename) rename.onsubmit = (event) => {

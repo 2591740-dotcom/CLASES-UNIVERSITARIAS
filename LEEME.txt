@@ -57,6 +57,13 @@ Quien elige Universidad César Vallejo y Psicología ve las clases
 ya procesadas. Quien elige otra universidad ve una lista vacía y
 puede cargar sus propias clases. No ve las de las demás.
 
+En cada carrera hay una cápsula de Curso. Abre un cuadro pequeño
+para elegir un curso, crear uno nuevo o renombrarlo. Las clases
+que se preparan ahí se ven solo en ese curso. Otro curso, aunque
+se renombre, muestra solo lo que se procesó dentro de él.
+En la clase, la cápsula escribe el curso que ya tiene. Desde ahí
+también se puede copiar el curso elegido en el inicio.
+
 La página hace lo mismo que el APK. En la computadora, en Android
 o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas
 el video de ese aparato. Lo ves ahí mismo, escuchas la pestaña y
