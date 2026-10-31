@@ -844,6 +844,9 @@ html[data-fondo="oscuro"] .bubble strong {
   color: var(--brass);
 }
 
+.gate { max-width: 520px; }
+.gate h2 { margin-top: 0; }
+
 @media print {
   .top, .chat, .tabs, .row, .film, #keybar, #config { display: none !important; }
   .layout { display: block; }

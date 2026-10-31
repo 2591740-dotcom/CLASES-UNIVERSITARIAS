@@ -44,8 +44,12 @@ En el sitio, Environment variables:
   SUPABASE_ANON_KEY = la clave anon (Project Settings, API)
   SUPABASE_EMAIL = claseclara.app.user@gmail.com
 
-La contraseña no va en Git. Está en static\cloud-config.js
-de esta PC, en el campo password. En la web se escribe al entrar.
+La contraseña de la app no va en Git. En la web cada persona
+crea una cuenta. El correo aparece en Supabase, Authentication,
+Users, bloqueado. Para activarlo, abre el usuario y quita el
+bloqueo. Si borras ese usuario, el mismo correo puede crear
+la cuenta otra vez. El correo y la contraseña quedan en el
+navegador de ese aparato.
 
 La página hace lo mismo que el APK. En la computadora, en Android
 o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas

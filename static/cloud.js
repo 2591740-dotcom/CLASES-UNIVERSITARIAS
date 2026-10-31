@@ -841,52 +841,175 @@
 
   window.claseClaraCloud = { api, saveEntry, saveYouTube };
 
-  function showLogin() {
+  const cuentaKey = "cc-cuenta";
+
+  function escGate(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[ch]));
+  }
+
+  function readCuenta() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(cuentaKey) || "null");
+      if (!parsed || !parsed.email || !parsed.clave) return null;
+      return { email: String(parsed.email), clave: String(parsed.clave) };
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCuenta(email, clave) {
+    localStorage.setItem(cuentaKey, JSON.stringify({ email, clave }));
+  }
+
+  function clearCuenta() {
+    localStorage.removeItem(cuentaKey);
+    localStorage.removeItem(sessionKey);
+    access = "";
+  }
+
+  function rememberSession(data) {
+    access = data.access_token;
+    localStorage.setItem(sessionKey, JSON.stringify({
+      access: data.access_token,
+      refresh: data.refresh_token,
+      exp: Date.now() + (Number(data.expires_in) || 3600) * 1000,
+    }));
+  }
+
+  function openApp() {
+    window.CLASECLARA_HOLD = false;
+    window.startClaseClara?.();
+  }
+
+  async function pedirCuenta(accion, email, clave) {
+    const response = await fetch("/.netlify/functions/cuenta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accion, email, clave }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!data.estado) throw new Error("No pude hablar con la cuenta.");
+    return data;
+  }
+
+  function gateMessage(estado) {
+    if (estado === "existe") return "Ese correo ya está anotado. Si lo borras en Supabase, se puede crear otra vez.";
+    if (estado === "correo") return "Escribe un correo válido.";
+    if (estado === "corta") return "La contraseña necesita al menos 6 caracteres.";
+    if (estado === "mal") return "Ese correo y esa contraseña no coinciden.";
+    if (estado === "no") return "Ese correo no está anotado. Crea la cuenta.";
+    return "No pude completar la cuenta.";
+  }
+
+  function showWaiting(email) {
     const root = document.querySelector("#app");
     if (!root) return;
-    const email = cfg.email || "";
     root.innerHTML = `
-      <section class="panel">
-        <h2>Entrar a tus clases</h2>
-        <label for="login-email">Correo</label>
-        <input id="login-email" type="email" autocomplete="username" value="${email.replace(/"/g, "")}">
-        <label for="login-pass">Contraseña</label>
-        <input id="login-pass" type="password" autocomplete="current-password">
-        <div class="row"><button class="primary" id="login-go" type="button">Entrar</button></div>
-        <p class="note" id="login-error" hidden></p>
+      <section class="hero">
+        <p class="kicker">Cuenta anotada</p>
+        <h1>Falta activar ${escGate(email)}.</h1>
+        <p class="lede">El correo y la contraseña quedaron guardados en este aparato. Cuando actives el correo, abre otra vez esta página y entra solo.</p>
+      </section>
+      <section class="panel gate">
+        <div class="row">
+          <button class="primary" id="gate-check" type="button">Revisar</button>
+          <button class="ghost" id="gate-other" type="button">Usar otro correo</button>
+        </div>
+        <p class="note" id="gate-error" hidden></p>
       </section>`;
-    document.querySelector("#login-go").onclick = async () => {
-      const button = document.querySelector("#login-go");
-      const note = document.querySelector("#login-error");
+    document.querySelector("#gate-check").onclick = () => checkSaved();
+    document.querySelector("#gate-other").onclick = () => {
+      clearCuenta();
+      showLanding("entrar");
+    };
+  }
+
+  function showLanding(mode, message) {
+    const root = document.querySelector("#app");
+    if (!root) return;
+    const crear = mode === "crear";
+    const saved = readCuenta();
+    root.innerHTML = `
+      <section class="hero">
+        <p class="kicker">ClaseClara</p>
+        <h1>Entra a tus clases.</h1>
+        <p class="lede">Crea una cuenta con tu correo. Queda anotada hasta que se active. En este aparato se guardan el correo y la contraseña, y la próxima vez entra solo.</p>
+      </section>
+      <section class="panel gate">
+        <h2>${crear ? "Crear cuenta" : "Entrar"}</h2>
+        <label for="gate-email">Correo</label>
+        <input id="gate-email" type="email" autocomplete="username" value="${escGate(saved ? saved.email : "")}">
+        <label for="gate-pass">Contraseña</label>
+        <input id="gate-pass" type="password" autocomplete="${crear ? "new-password" : "current-password"}">
+        <div class="row">
+          <button class="primary" id="gate-go" type="button">${crear ? "Crear cuenta" : "Entrar"}</button>
+          <button class="ghost" id="gate-switch" type="button">${crear ? "Ya tengo cuenta" : "Crear cuenta"}</button>
+        </div>
+        <p class="note" id="gate-error" ${message ? "" : "hidden"}>${escGate(message || "")}</p>
+      </section>`;
+    document.querySelector("#gate-switch").onclick = () => showLanding(crear ? "entrar" : "crear");
+    document.querySelector("#gate-go").onclick = async () => {
+      const button = document.querySelector("#gate-go");
+      const note = document.querySelector("#gate-error");
+      const email = document.querySelector("#gate-email").value.trim();
+      const clave = document.querySelector("#gate-pass").value;
       button.disabled = true;
       note.hidden = true;
       try {
-        await auth({
-          grant_type: "password",
-          email: document.querySelector("#login-email").value.trim(),
-          password: document.querySelector("#login-pass").value,
-        });
-        window.CLASECLARA_HOLD = false;
-        window.startClaseClara();
+        const data = await pedirCuenta(crear ? "crear" : "entrar", email, clave);
+        if (data.estado === "ok") {
+          writeCuenta(email, clave);
+          rememberSession(data);
+          openApp();
+          return;
+        }
+        if (data.estado === "pendiente") {
+          writeCuenta(email, clave);
+          showWaiting(email);
+          return;
+        }
+        if (data.estado === "no" || data.estado === "mal") clearCuenta();
+        note.hidden = false;
+        note.textContent = gateMessage(data.estado);
+        button.disabled = false;
       } catch (error) {
         note.hidden = false;
-        note.textContent = "No pude entrar. Revisa el correo y la contraseña.";
+        note.textContent = error.message;
         button.disabled = false;
       }
     };
   }
 
-  if (onWeb && !cfg.password) {
-    window.CLASECLARA_HOLD = true;
-    queueMicrotask(async () => {
-      const saved = JSON.parse(localStorage.getItem(sessionKey) || "null");
-      if (saved && saved.access && saved.exp > Date.now() + 60000) {
-        access = saved.access;
-        window.CLASECLARA_HOLD = false;
-        window.startClaseClara?.();
+  async function checkSaved() {
+    const saved = readCuenta();
+    if (!saved) {
+      showLanding("entrar");
+      return;
+    }
+    try {
+      const data = await pedirCuenta("entrar", saved.email, saved.clave);
+      if (data.estado === "ok") {
+        rememberSession(data);
+        openApp();
         return;
       }
-      showLogin();
-    });
+      if (data.estado === "pendiente") {
+        showWaiting(saved.email);
+        return;
+      }
+      clearCuenta();
+      showLanding("entrar", data.estado === "mal"
+        ? "La contraseña guardada ya no coincide. Escríbela de nuevo."
+        : "Ese correo ya no está. Puedes crear la cuenta otra vez.");
+    } catch (error) {
+      showLanding("entrar", error.message);
+    }
+  }
+
+  if (onWeb && !cfg.password) {
+    window.CLASECLARA_HOLD = true;
+    queueMicrotask(() => { checkSaved(); });
   }
 })();

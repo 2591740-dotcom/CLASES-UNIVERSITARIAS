@@ -332,6 +332,7 @@ function dismissConfig() {
 }
 
 function goHome() {
+  if (window.CLASECLARA_HOLD) return;
   const box = document.querySelector("#config");
   if (box && !box.hidden) {
     dismissConfig();
