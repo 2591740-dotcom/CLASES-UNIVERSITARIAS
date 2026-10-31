@@ -238,6 +238,10 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
   display: flex;
   flex-direction: column;
   gap: 6px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .card h3, .block h3, .hard h2, .study-head h1 {
@@ -251,24 +255,24 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 
 .card .actions { display: flex; gap: 8px; margin-top: 8px; }
 
-.card-move { display: flex; gap: 6px; align-items: center; }
+.card .actions button { cursor: pointer; }
 
-.card-grip {
-  flex: 1;
-  border: 1px dashed var(--line);
-  background: transparent;
-  color: var(--muted);
-  border-radius: 10px;
-  padding: 6px 8px;
-  font-size: 13px;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
+.card.holding {
+  transform: scale(0.985);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+  transition: transform 1s ease, box-shadow 1s ease;
 }
 
-.card-move .ghost { padding: 6px 10px; font-size: 13px; }
-.card-move .ghost:disabled { opacity: 0.35; }
-.card.dragging { opacity: 0.55; pointer-events: none; }
+.card.dragging {
+  position: relative;
+  z-index: 4;
+  transform: scale(1.03);
+  opacity: 0.92;
+  pointer-events: none;
+  cursor: grabbing;
+  touch-action: none;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+}
 
 .status {
   font-size: 12px;
@@ -970,12 +974,6 @@ html[data-fondo="oscuro"] .fondo .texty.on {
 html[data-fondo="oscuro"] .banner {
   background: #2a2118;
   border-color: #5c4632;
-}
-
-html[data-fondo="oscuro"] .card-grip {
-  background: #141414;
-  color: #f7f4ee;
-  border-color: #2e2e2e;
 }
 
 html[data-fondo="oscuro"] .drop { border-color: #3a3a3a; }

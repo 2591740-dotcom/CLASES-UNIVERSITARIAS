@@ -721,11 +721,6 @@ function cardHtml(item) {
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
   return `
     <article class="card" data-id="${esc(item.id)}">
-      <div class="card-move">
-        <button class="card-grip" type="button">Arrastrar</button>
-        <button class="ghost move-up" type="button">Subir</button>
-        <button class="ghost move-down" type="button">Bajar</button>
-      </div>
       <span class="status ${esc(item.status)}">${esc(state)}</span>
       ${flag}
       <h3>${esc(item.title || "Clase")}</h3>
@@ -1144,16 +1139,6 @@ async function showHome() {
   });
 }
 
-function pintarLimites(grid) {
-  const items = [...grid.querySelectorAll(".card")];
-  items.forEach((card, index) => {
-    const up = card.querySelector(".move-up");
-    const down = card.querySelector(".move-down");
-    if (up) up.disabled = index === 0;
-    if (down) down.disabled = index === items.length - 1;
-  });
-}
-
 function idsDelGrid(grid) {
   return [...grid.querySelectorAll(".card")]
     .map((card) => card.dataset.id)
@@ -1179,30 +1164,35 @@ async function guardarOrdenVisible(grid) {
   }
 }
 
-function moverTarjeta(card, delta) {
-  const grid = card && card.parentElement;
-  if (!grid) return;
-  const items = [...grid.querySelectorAll(".card")];
-  const index = items.indexOf(card);
-  const next = index + delta;
-  if (index < 0 || next < 0 || next >= items.length) return;
-  const other = items[next];
-  if (delta < 0) grid.insertBefore(card, other);
-  else grid.insertBefore(other, card);
-  pintarLimites(grid);
-  guardarOrdenVisible(grid);
-}
-
-function empezarMover(event, card, grid) {
+function prepararMover(event, card, grid) {
   if (event.button != null && event.button !== 0) return;
-  event.preventDefault();
-  card.classList.add("dragging");
-  try { card.setPointerCapture(event.pointerId); } catch { /* el arrastre sigue aunque el dedo salga de la tarjeta */ }
+  if (card.classList.contains("holding") || card.classList.contains("dragging")) return;
+  if (event.target.closest("button, a, input, textarea, select, label")) return;
+  const origenX = event.clientX;
+  const origenY = event.clientY;
+  let activo = false;
+  let cerrado = false;
+  const timer = setTimeout(() => {
+    if (cerrado) return;
+    activo = true;
+    card.classList.remove("holding");
+    card.classList.add("dragging");
+    try { card.setPointerCapture(event.pointerId); } catch { /* el dedo sigue moviendo la tarjeta */ }
+    if (navigator.vibrate) navigator.vibrate(16);
+  }, 1000);
+  card.classList.add("holding");
+  const frenarToque = (ev) => {
+    if (activo && ev.cancelable) ev.preventDefault();
+  };
   const move = (ev) => {
+    if (!activo) {
+      if (Math.hypot(ev.clientX - origenX, ev.clientY - origenY) > 12) terminar(false);
+      return;
+    }
     if (ev.cancelable) ev.preventDefault();
-    const edge = 72;
-    if (ev.clientY > window.innerHeight - edge) window.scrollBy(0, 28);
-    else if (ev.clientY < edge) window.scrollBy(0, -28);
+    const borde = 72;
+    if (ev.clientY > window.innerHeight - borde) window.scrollBy(0, 28);
+    else if (ev.clientY < borde) window.scrollBy(0, -28);
     const x = Math.max(8, Math.min(window.innerWidth - 8, ev.clientX));
     const y = Math.max(8, Math.min(window.innerHeight - 8, ev.clientY));
     const under = document.elementFromPoint(x, y);
@@ -1214,37 +1204,38 @@ function empezarMover(event, card, grid) {
     if (from < 0 || to < 0 || from === to) return;
     if (from < to) grid.insertBefore(card, target.nextElementSibling);
     else grid.insertBefore(card, target);
-    pintarLimites(grid);
   };
-  const end = () => {
-    card.classList.remove("dragging");
+  const terminar = (guardar) => {
+    if (cerrado) return;
+    cerrado = true;
+    clearTimeout(timer);
     window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", end);
-    window.removeEventListener("pointercancel", end);
-    guardarOrdenVisible(grid);
+    window.removeEventListener("touchmove", frenarToque);
+    window.removeEventListener("pointerup", alSoltar);
+    window.removeEventListener("pointercancel", alSoltar);
+    const listo = activo;
+    activo = false;
+    card.classList.remove("holding", "dragging");
+    if (guardar && listo) guardarOrdenVisible(grid);
   };
+  const alSoltar = () => terminar(true);
   window.addEventListener("pointermove", move, { passive: false });
-  window.addEventListener("pointerup", end);
-  window.addEventListener("pointercancel", end);
+  window.addEventListener("touchmove", frenarToque, { passive: false });
+  window.addEventListener("pointerup", alSoltar);
+  window.addEventListener("pointercancel", alSoltar);
 }
 
 function bindOrder() {
   const grid = document.querySelector(".grid");
   if (!grid) return;
   const cards = [...grid.querySelectorAll(".card")];
-  if (cards.length < 2) {
-    grid.querySelectorAll(".card-move").forEach((row) => { row.hidden = true; });
-    return;
-  }
-  pintarLimites(grid);
-  grid.querySelectorAll(".move-up").forEach((button) => {
-    button.onclick = () => moverTarjeta(button.closest(".card"), -1);
-  });
-  grid.querySelectorAll(".move-down").forEach((button) => {
-    button.onclick = () => moverTarjeta(button.closest(".card"), 1);
-  });
-  grid.querySelectorAll(".card-grip").forEach((grip) => {
-    grip.addEventListener("pointerdown", (event) => empezarMover(event, grip.closest(".card"), grid));
+  if (cards.length < 2) return;
+  cards.forEach((card) => {
+    card.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("button, a")) return;
+      event.preventDefault();
+    });
+    card.addEventListener("pointerdown", (event) => prepararMover(event, card, grid));
   });
 }
 
