@@ -395,7 +395,20 @@ function renderChrome() {
   if (configBtn) configBtn.onclick = openConfig;
   const salirBtn = document.querySelector("#salir-cuenta");
   if (salirBtn) salirBtn.onclick = salirCuenta;
+  placeClassTools();
 }
+
+function placeClassTools() {
+  const tools = document.querySelector(".class-tools");
+  const head = document.querySelector(".top");
+  if (!tools || !head) return;
+  const headH = Math.ceil(head.getBoundingClientRect().height);
+  const toolsH = Math.ceil(tools.getBoundingClientRect().height);
+  document.documentElement.style.setProperty("--head-h", headH + "px");
+  document.documentElement.style.setProperty("--tools-h", toolsH + "px");
+}
+
+window.addEventListener("resize", () => placeClassTools());
 
 function renderKey(status) {
   setup = status || {};
@@ -606,6 +619,37 @@ window.addEventListener("popstate", () => {
   }
   if (document.querySelector("#class-heading") || document.querySelector("#process")) showHome();
 });
+
+window.claseClaraAtras = function () {
+  if (window.CLASECLARA_HOLD) return false;
+  const frame = document.querySelector("#frame-lightbox");
+  if (frame && !frame.hidden) {
+    closeFrame();
+    return true;
+  }
+  if (document.querySelector(".wiki-peek")) {
+    closeWikiPeek();
+    return true;
+  }
+  if (document.querySelector("#course-modal")) {
+    cerrarCursoModal();
+    return true;
+  }
+  if (document.querySelector("#prepare-modal")) {
+    cerrarPreparar();
+    return true;
+  }
+  const config = document.querySelector("#config");
+  if (config && !config.hidden && config.innerHTML) {
+    dismissConfig();
+    return true;
+  }
+  if (document.querySelector("#class-heading") || document.querySelector("#process")) {
+    goHome();
+    return true;
+  }
+  return false;
+};
 
 function syncConfig() {
   const providers = (setup && setup.providers) || [];
@@ -1896,6 +1940,7 @@ function studyHtml(data) {
       <button class="ghost" id="back" type="button">Inicio</button>
       <button class="ghost danger" id="delete" type="button">Borrar</button>
     </div>
+    <div class="class-tools-pad"></div>
     <div class="layout">
       <section>
         <div class="study-head">
@@ -2892,6 +2937,7 @@ function abrirAvisos() {
 }
 
 function bindStudy() {
+  placeClassTools();
   document.querySelector("#back").onclick = goHome;
   const cursoClase = document.querySelector("#clase-curso");
   if (cursoClase) {
