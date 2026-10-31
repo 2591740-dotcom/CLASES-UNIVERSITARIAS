@@ -447,10 +447,14 @@
     else if (file) rememberBrowser(id, file);
     if (!classId) {
       const titulo = (file ? file.name.replace(/\.[^.]+$/, "") : "Clase por enlace").slice(0, 140);
+      const estudio = estudioActual();
+      if (!estudio) throw new Error("Entra de nuevo para preparar la clase.");
       await rest("POST", "/rest/v1/clases", {
         id,
         titulo,
         materia: course,
+        universidad: estudio.universidad,
+        carrera: estudio.carrera,
         video_url: link || "",
         estudio: {},
         transcripcion: {},
@@ -777,8 +781,13 @@
     }
     if (url === "/api/zoom") return { recordings: [] };
     if (url === "/api/classes" && method === "GET") {
-      const rows = await rest("GET", "/rest/v1/clases?select=id,titulo,materia,duracion,estado,detalle,creado,estudio&order=creado.desc");
-      const list = Array.isArray(rows) ? rows : [];
+      const rows = await rest("GET", "/rest/v1/clases?select=id,titulo,materia,universidad,carrera,duracion,estado,detalle,creado,estudio&order=creado.desc");
+      const estudio = estudioActual();
+      const list = (Array.isArray(rows) ? rows : []).filter((row) => (
+        estudio
+        && row.universidad === estudio.universidad
+        && row.carrera === estudio.carrera
+      ));
       return { classes: list.map(card) };
     }
     if (url === "/api/classes" && method === "POST") {
@@ -849,18 +858,41 @@
     }[ch]));
   }
 
+  const universidades = [
+    "Universidad César Vallejo",
+    "Universidad Privada del Norte",
+    "Universidad Autónoma",
+  ];
+  const carreras = ["Psicología"];
+
   function readCuenta() {
     try {
       const parsed = JSON.parse(localStorage.getItem(cuentaKey) || "null");
       if (!parsed || !parsed.email || !parsed.clave) return null;
-      return { email: String(parsed.email), clave: String(parsed.clave) };
+      return {
+        email: String(parsed.email),
+        clave: String(parsed.clave),
+        universidad: String(parsed.universidad || ""),
+        carrera: String(parsed.carrera || ""),
+      };
     } catch {
       return null;
     }
   }
 
-  function writeCuenta(email, clave) {
-    localStorage.setItem(cuentaKey, JSON.stringify({ email, clave }));
+  function writeCuenta(email, clave, universidad, carrera) {
+    localStorage.setItem(cuentaKey, JSON.stringify({
+      email,
+      clave,
+      universidad: String(universidad || ""),
+      carrera: String(carrera || ""),
+    }));
+  }
+
+  function estudioActual() {
+    const saved = readCuenta();
+    if (!saved || !saved.universidad || !saved.carrera) return null;
+    return { universidad: saved.universidad, carrera: saved.carrera };
   }
 
   function clearSession() {
@@ -883,12 +915,20 @@
   }
 
   function openApp() {
+    const saved = readCuenta();
+    window.CLASECLARA_ESTUDIO = saved && saved.universidad
+      ? { universidad: saved.universidad, carrera: saved.carrera }
+      : null;
     window.CLASECLARA_HOLD = false;
     window.startClaseClara?.();
   }
 
-  async function pedirCuenta(accion, email, clave) {
+  async function pedirCuenta(accion, email, clave, estudio) {
     const payload = { accion, email, clave };
+    if (estudio) {
+      payload.universidad = estudio.universidad;
+      payload.carrera = estudio.carrera;
+    }
     if (native) {
       const http = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
       if (!http) throw new Error("No pude hablar con la cuenta.");
@@ -919,6 +959,7 @@
     if (estado === "existe") return "Ese correo ya está anotado. Si borras su fila en la tabla cuentas, se puede crear otra vez.";
     if (estado === "correo") return "Escribe un correo válido.";
     if (estado === "corta") return "La contraseña necesita al menos 6 caracteres.";
+    if (estado === "estudio") return "Elige la universidad y la carrera.";
     if (estado === "mal") return "Ese correo y esa contraseña no coinciden.";
     if (estado === "no") return "Ese correo no está anotado. Crea la cuenta.";
     return "No pude completar la cuenta.";
@@ -957,7 +998,7 @@
       <section class="hero">
         <p class="kicker">ClaseClara</p>
         <h1>Entra a tus clases.</h1>
-        <p class="lede">Crea una cuenta con tu correo. Queda anotada hasta que se active. En este aparato se guardan el correo y la contraseña, y la próxima vez entra solo.</p>
+        <p class="lede">Crea una cuenta con tu correo, tu universidad y tu carrera. Entras enseguida. En este aparato se guardan el correo y la contraseña.</p>
       </section>
       <section class="panel gate">
         <h2>${crear ? "Crear cuenta" : "Entrar"}</h2>
@@ -965,6 +1006,16 @@
         <input id="gate-email" type="email" autocomplete="username" value="${escGate(saved ? saved.email : "")}">
         <label for="gate-pass">Contraseña</label>
         <input id="gate-pass" type="password" autocomplete="${crear ? "new-password" : "current-password"}">
+        ${crear ? `
+        <label for="gate-uni">Universidad</label>
+        <select id="gate-uni">
+          <option value="">Elige la universidad</option>
+          ${universidades.map((nombre) => `<option value="${escGate(nombre)}">${escGate(nombre)}</option>`).join("")}
+        </select>
+        <label for="gate-carrera">Carrera</label>
+        <select id="gate-carrera">
+          ${carreras.map((nombre) => `<option value="${escGate(nombre)}">${escGate(nombre)}</option>`).join("")}
+        </select>` : ""}
         <div class="row">
           <button class="primary" id="gate-go" type="button">${crear ? "Crear cuenta" : "Entrar"}</button>
           <button class="ghost" id="gate-switch" type="button">${crear ? "Ya tengo cuenta" : "Crear cuenta"}</button>
@@ -977,18 +1028,22 @@
       const note = document.querySelector("#gate-error");
       const email = document.querySelector("#gate-email").value.trim();
       const clave = document.querySelector("#gate-pass").value;
+      const estudio = crear ? {
+        universidad: document.querySelector("#gate-uni").value,
+        carrera: document.querySelector("#gate-carrera").value,
+      } : null;
       button.disabled = true;
       note.hidden = true;
       try {
-        const data = await pedirCuenta(crear ? "crear" : "entrar", email, clave);
+        const data = await pedirCuenta(crear ? "crear" : "entrar", email, clave, estudio);
         if (data.estado === "ok") {
-          writeCuenta(email, clave);
+          writeCuenta(email, clave, data.universidad, data.carrera);
           rememberSession(data);
           openApp();
           return;
         }
         if (data.estado === "pendiente") {
-          writeCuenta(email, clave);
+          writeCuenta(email, clave, data.universidad, data.carrera);
           showWaiting(email);
           return;
         }
@@ -1013,6 +1068,7 @@
     try {
       const data = await pedirCuenta("entrar", saved.email, saved.clave);
       if (data.estado === "ok") {
+        writeCuenta(saved.email, saved.clave, data.universidad || saved.universidad, data.carrera || saved.carrera);
         rememberSession(data);
         openApp();
         return;

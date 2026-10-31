@@ -45,12 +45,17 @@ En el sitio, Environment variables:
   SUPABASE_EMAIL = claseclara.app.user@gmail.com
 
 La contraseña de la app no va en Git. En la web y en el APK cada
-persona crea una cuenta. El correo aparece en Supabase, Table Editor,
-tabla cuentas, con activo en falso. Para dar permiso, pon
-activo en true. La contraseña no se guarda en esa tabla: queda
-en ese aparato. Si borras la fila de ese correo, la misma persona
-puede crear la cuenta otra vez. Sirve igual en el navegador y en
-el teléfono.
+persona crea una cuenta y entra enseguida. Antes elige la universidad
+y la carrera. Hoy la carrera es Psicología. Las universidades son
+César Vallejo, Privada del Norte y Autónoma. El correo, la universidad
+y la carrera quedan en Supabase, Table Editor, tabla cuentas.
+La contraseña no se guarda en esa tabla: queda en ese aparato.
+Si borras la fila de ese correo, la misma persona puede crear la
+cuenta otra vez.
+
+Quien elige Universidad César Vallejo y Psicología ve las clases
+ya procesadas. Quien elige otra universidad ve una lista vacía y
+puede cargar sus propias clases. No ve las de las demás.
 
 La página hace lo mismo que el APK. En la computadora, en Android
 o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas
@@ -60,8 +65,8 @@ demás aparatos los prepara esta PC cuando iniciar.bat está abierto.
 El archivo no se queda guardado en Supabase.
 
 El APK está en ClaseClara.apk, en esta misma carpeta.
-Instálalo encima del anterior. Pide el correo y espera el
-permiso de la tabla cuentas, igual que la página.
+Instálalo encima del anterior. Pide el correo, la universidad
+y la carrera, y entra enseguida, igual que la página.
 
 Escuchar lee en voz alta la pestaña que estás viendo:
 explicación, resumen, esquema, glosario, repaso, avisos,

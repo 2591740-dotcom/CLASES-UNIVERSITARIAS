@@ -846,6 +846,13 @@ html[data-fondo="oscuro"] .bubble strong {
 
 .gate { max-width: 520px; }
 .gate h2 { margin-top: 0; }
+.gate select {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 12px;
+  padding: 11px 12px;
+}
 
 @media print {
   .top, .chat, .tabs, .row, .film, #keybar, #config { display: none !important; }

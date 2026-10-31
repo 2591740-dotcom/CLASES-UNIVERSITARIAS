@@ -419,12 +419,14 @@ async function saveConfig() {
 
 function phoneHome(classes) {
   const list = Array.isArray(classes) ? classes : [];
+  const estudio = window.CLASECLARA_ESTUDIO || {};
+  const ambito = estudio.universidad ? `${estudio.carrera || ""} · ${estudio.universidad}` : "";
   const mine = list.length
     ? list.map(cardHtml).join("")
-    : '<p class="empty">Todavía no hay clases. Carga un video o pega el enlace de Zoom.</p>';
+    : `<p class="empty">Todavía no hay clases${ambito ? ` de ${esc(estudio.carrera)} en ${esc(estudio.universidad)}` : ""}. Carga un video o pega el enlace de Zoom.</p>`;
   return `
     <section class="hero">
-      <p class="kicker">Tu clase, en claro</p>
+      <p class="kicker">${esc(ambito || "Tu clase, en claro")}</p>
       <h1>La misma clase, en este aparato.</h1>
       <p class="lede">Pega el enlace de Zoom o carga el video. En la computadora, en Android y en el iPhone puedes ver el video, escuchar la clase y preguntar en el chat.</p>
     </section>

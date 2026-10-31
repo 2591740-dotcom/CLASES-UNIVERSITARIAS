@@ -28,6 +28,20 @@ function prohibido(data) {
   return data.error === "user_banned" || data.error_code === "user_banned" || data.msg === "User is banned";
 }
 
+const UNIVERSIDADES = new Set([
+  "Universidad César Vallejo",
+  "Universidad Privada del Norte",
+  "Universidad Autónoma",
+]);
+const CARRERAS = new Set(["Psicología"]);
+
+function estudioDe(body) {
+  const universidad = String((body && body.universidad) || "").trim();
+  const carrera = String((body && body.carrera) || "").trim();
+  if (!UNIVERSIDADES.has(universidad) || !CARRERAS.has(carrera)) return null;
+  return { universidad, carrera };
+}
+
 async function users(url, secret) {
   const response = await fetch(`${url}/auth/v1/admin/users?page=1&per_page=1000`, {
     headers: adminHeaders(secret),
@@ -39,7 +53,7 @@ async function users(url, secret) {
 
 async function filaDe(url, secret, email) {
   const response = await fetch(
-    `${url}/rest/v1/cuentas?email=eq.${encodeURIComponent(email)}&select=email,activo`,
+    `${url}/rest/v1/cuentas?email=eq.${encodeURIComponent(email)}&select=email,activo,universidad,carrera`,
     { headers: { ...adminHeaders(secret), Accept: "application/json" } },
   );
   const data = await response.json().catch(() => null);
@@ -47,11 +61,16 @@ async function filaDe(url, secret, email) {
   return data[0] || null;
 }
 
-async function anotar(url, secret, email) {
+async function anotar(url, secret, email, estudio) {
   const response = await fetch(`${url}/rest/v1/cuentas`, {
     method: "POST",
     headers: { ...adminHeaders(secret), Prefer: "return=minimal" },
-    body: JSON.stringify({ email, activo: false }),
+    body: JSON.stringify({
+      email,
+      activo: true,
+      universidad: estudio.universidad,
+      carrera: estudio.carrera,
+    }),
   });
   if (response.status === 409) return "existe";
   if (!response.ok) throw new Error("tabla");
@@ -66,7 +85,7 @@ async function borrarUsuario(url, secret, id) {
   if (!response.ok) throw new Error("auth");
 }
 
-async function crearUsuario(url, secret, email, clave) {
+async function crearUsuario(url, secret, email, clave, estudio) {
   const response = await fetch(`${url}/auth/v1/admin/users`, {
     method: "POST",
     headers: adminHeaders(secret),
@@ -74,8 +93,11 @@ async function crearUsuario(url, secret, email, clave) {
       email,
       password: clave,
       email_confirm: true,
-      ban_duration: "876000h",
-      app_metadata: { marca: await marcaDe(clave) },
+      app_metadata: {
+        marca: await marcaDe(clave),
+        universidad: estudio.universidad,
+        carrera: estudio.carrera,
+      },
     }),
   });
   const data = await response.json().catch(() => ({}));
@@ -153,12 +175,14 @@ export default async (req) => {
   }
 
   if (accion === "crear") {
+    const estudio = estudioDe(body);
+    if (!estudio) return Response.json({ estado: "estudio" });
     if (reservado || fila) return Response.json({ estado: "existe" });
     let id = "";
     try {
       if (ya) await borrarUsuario(url, secret, ya.id);
-      id = await crearUsuario(url, secret, email, clave);
-      const anotado = await anotar(url, secret, email);
+      id = await crearUsuario(url, secret, email, clave, estudio);
+      const anotado = await anotar(url, secret, email, estudio);
       if (anotado === "existe") {
         await borrarUsuario(url, secret, id).catch(() => {});
         return Response.json({ estado: "existe" });
@@ -167,7 +191,15 @@ export default async (req) => {
       if (id) await borrarUsuario(url, secret, id).catch(() => {});
       return Response.json({ estado: "no", aviso: "No pude anotar el correo." }, { status: 502 });
     }
-    return Response.json({ estado: "pendiente" });
+    const login = await entrarConClave(url, anon, email, clave);
+    if (login.ok && login.data.access_token) {
+      return Response.json({
+        ...sesion(login.data),
+        universidad: estudio.universidad,
+        carrera: estudio.carrera,
+      });
+    }
+    return Response.json({ estado: "no", aviso: "La cuenta quedó anotada, pero no pude abrirla." }, { status: 502 });
   }
 
   if (!fila) return Response.json({ estado: "no" });
@@ -188,7 +220,13 @@ export default async (req) => {
     await ponerBan(url, secret, ya.id, false);
     login = await entrarConClave(url, anon, email, clave);
   }
-  if (login.ok && login.data.access_token) return Response.json(sesion(login.data));
+  if (login.ok && login.data.access_token) {
+    return Response.json({
+      ...sesion(login.data),
+      universidad: fila.universidad || "",
+      carrera: fila.carrera || "",
+    });
+  }
   if (prohibido(login.data)) return Response.json({ estado: "pendiente" });
   return Response.json({ estado: "mal" });
 };
