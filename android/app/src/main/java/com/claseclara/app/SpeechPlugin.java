@@ -121,6 +121,7 @@ public class SpeechPlugin extends Plugin {
             return;
         }
         applySpanish();
+        applyRate();
         int max = TextToSpeech.getMaxSpeechInputLength();
         if (max < 200) max = 3900;
         int queue = TextToSpeech.QUEUE_FLUSH;
@@ -173,6 +174,14 @@ public class SpeechPlugin extends Plugin {
         if (current == null) return;
         if (ok) current.resolve();
         else current.reject("sin voz");
+    }
+
+    private void applyRate() {
+        if (tts == null || active == null) return;
+        Double rate = active.getDouble("rate", 1d);
+        float value = rate == null ? 1f : rate.floatValue();
+        if (value < 0.5f || value > 2f) value = 1f;
+        tts.setSpeechRate(value);
     }
 
     private void applySpanish() {

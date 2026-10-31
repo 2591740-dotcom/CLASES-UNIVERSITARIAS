@@ -387,12 +387,50 @@ def list_classes() -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
         row = public_meta(meta)
+        row["curso_id"] = str(meta.get("curso_id") or "")
         study = read_json(folder / "study.json", None)
         if isinstance(study, dict) and isinstance(study.get("avisos"), list):
             row["avisos"] = len(study["avisos"])
         rows.append(row)
     rows.sort(key=lambda row: row.get("created") or "", reverse=True)
     return rows
+
+
+def course_catalog() -> dict:
+    try:
+        rows = cloud.list_cursos()
+    except engine.AppError:
+        rows = []
+    items = [
+        {"id": row.get("id"), "nombre": row.get("nombre") or ""}
+        for row in rows
+        if row.get("id")
+    ]
+    return {"items": items}
+
+
+def attach_courses(rows: list[dict]) -> list[dict]:
+    try:
+        remote = cloud.curso_por_clase()
+    except engine.AppError:
+        remote = {}
+    names = {item["id"]: item["nombre"] for item in course_catalog()["items"]}
+    for row in rows:
+        curso_id = remote.get(str(row.get("id") or "")) or row.get("curso_id") or ""
+        row["curso_id"] = curso_id
+        row["curso"] = names.get(curso_id, "")
+    return rows
+
+
+def remember_course(class_id: str, curso_id: str) -> None:
+    curso = cloud._curso_id(curso_id)
+    if not curso:
+        raise engine.AppError("Elige un curso.")
+    update_meta(class_id, curso_id=curso)
+    try:
+        cloud.asignar_curso(class_id, curso)
+    except engine.AppError:
+        return
 
 
 def zoom_recordings() -> list[dict]:
@@ -455,13 +493,17 @@ def class_detail(class_id: str) -> dict:
     if isinstance(study, dict):
         study = engine.place_youtube(study, lines)
         study["links"] = engine.collect_links(study, lines)
-        if engine.stamp_topics(study, meta.get("frames") or [], lines):
+        changed = engine.stamp_points(study, meta.get("frames") or [], lines)
+        changed = engine.stamp_topics(study, meta.get("frames") or [], lines) or changed
+        if changed:
             (folder / "study.json").write_text(
                 json.dumps(study, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
     source = Path(meta.get("source") or "")
     payload = public_meta(meta)
+    payload["curso_id"] = str(meta.get("curso_id") or "")
+    attach_courses([payload])
     if payload.get("media_kind") != "youtube":
         payload["media_kind"] = media_kind(source)
         payload["media_src"] = ""
@@ -681,7 +723,7 @@ def queue_youtube() -> None:
         start_youtube(folder.name)
 
 
-def create_class_from_url(url: str, materia: str, terms: str) -> str:
+def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = "") -> str:
     class_id = new_id()
     folder = class_dir(class_id)
     folder.mkdir(parents=True, exist_ok=True)
@@ -704,6 +746,7 @@ def create_class_from_url(url: str, materia: str, terms: str) -> str:
             "frames": [],
             "reuse_transcript": False,
             "started": int(datetime.now().timestamp()),
+            "curso_id": cloud._curso_id(curso_id),
         }
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
@@ -847,7 +890,7 @@ def watch_cloud() -> None:
         time.sleep(10)
 
 
-def create_class(source: Path, materia: str, terms: str, reuse: bool = False) -> str:
+def create_class(source: Path, materia: str, terms: str, reuse: bool = False, curso_id: str = "") -> str:
     media, _audio = engine.resolve_source(source)
     class_id = new_id()
     folder = class_dir(class_id)
@@ -867,6 +910,7 @@ def create_class(source: Path, materia: str, terms: str, reuse: bool = False) ->
         "frames": [],
         "reuse_transcript": reuse,
         "started": int(datetime.now().timestamp()),
+        "curso_id": cloud._curso_id(curso_id),
     }
     write_meta(class_id, meta)
     print(f"[ClaseClara] empieza {class_id} {media.name}", flush=True)
@@ -1132,7 +1176,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, status_payload())
                 return
             if path == "/api/classes":
-                self._json(200, {"classes": list_classes()})
+                self._json(200, {"classes": attach_courses(list_classes()), "cursos": course_catalog()})
                 return
             if path == "/api/zoom":
                 self._json(200, {"recordings": zoom_recordings()})
@@ -1190,14 +1234,32 @@ class Handler(BaseHTTPRequestHandler):
                 raw_url = str(body.get("url") or "").strip()
                 materia = str(body.get("materia") or "")
                 terms = str(body.get("terms") or "")
+                curso_id = str(body.get("curso_id") or "")
                 if raw_url:
-                    class_id = create_class_from_url(raw_url, materia, terms)
+                    class_id = create_class_from_url(raw_url, materia, terms, curso_id)
                 else:
                     raw_path = str(body.get("path") or "").strip().strip('"')
                     if not raw_path:
                         raise engine.AppError("Elige un video o pega un enlace.")
-                    class_id = create_class(Path(raw_path), materia, terms)
+                    class_id = create_class(Path(raw_path), materia, terms, curso_id=curso_id)
                 self._json(200, {"id": class_id})
+                return
+            if path == "/api/cursos":
+                body = self._read_json()
+                cloud.crear_curso(str(body.get("nombre") or ""))
+                self._json(200, course_catalog())
+                return
+            renamed_course = re.fullmatch(r"/api/cursos/([0-9a-f-]{36})", path)
+            if renamed_course:
+                body = self._read_json()
+                cloud.renombrar_curso(renamed_course.group(1), str(body.get("nombre") or ""))
+                self._json(200, course_catalog())
+                return
+            assigned = re.fullmatch(r"/api/classes/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})/curso", path)
+            if assigned:
+                body = self._read_json()
+                remember_course(assigned.group(1), str(body.get("curso_id") or ""))
+                self._json(200, {"ok": True})
                 return
             renamed = re.fullmatch(r"/api/classes/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})/title", path)
             if renamed:

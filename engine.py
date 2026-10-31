@@ -426,12 +426,20 @@ def join_words(words: list[str]) -> str:
 
 
 def group_lines(stt: dict) -> list[dict]:
-    words = stt.get("words") or []
+    words = [word for word in (stt.get("words") or []) if isinstance(word, dict)]
     if not words:
         text = (stt.get("text") or "").strip()
         if not text:
             return []
         return [{"time": 0, "stamp": "0:00", "speaker": "Voz", "text": text}]
+
+    starts = [float(word.get("start") or 0) for word in words]
+    # A single timestamp at the end of the file is the duration, not a topic.
+    if max(starts) - min(starts) <= 1 and max(starts) > 1:
+        text = join_words([str(word.get("text") or "") for word in words]) or (stt.get("text") or "").strip()
+        if not text:
+            return []
+        return [{"time": 0, "stamp": "", "speaker": "Voz", "text": text}]
 
     labels: dict = {}
 
@@ -475,9 +483,17 @@ def group_lines(stt: dict) -> list[dict]:
 
 
 def lines_to_text(lines: list[dict]) -> str:
-    return "\n".join(
-        f"[{line['stamp']}] {line['speaker']}: {line['text']}" for line in lines
-    )
+    blocked = _blocked_seconds(lines)
+    rows = []
+    for line in lines:
+        stamp = line.get("stamp") or ""
+        if blocked:
+            seconds = float(line.get("time") or 0) or _clock_seconds(str(stamp))
+            if any(abs(seconds - mark) <= 2 for mark in blocked):
+                stamp = ""
+        prefix = f"[{stamp}] " if stamp else ""
+        rows.append(f"{prefix}{line['speaker']}: {line['text']}")
+    return "\n".join(rows)
 
 
 def clip_text(text: str, limit: int) -> str:
@@ -1291,7 +1307,12 @@ def _transcribe_chunked(audio: Path, cfg: AiConfig, max_bytes: int, one) -> dict
 
 def transcribe(audio: Path, keyterms: list[str], cfg: AiConfig) -> dict:
     if cfg.stt_kind == "grok":
-        return _transcribe_grok(audio, keyterms, cfg)
+        payload = _transcribe_grok(audio, keyterms, cfg)
+        parsed = segments_to_stt(payload)
+        parsed["language"] = str(payload.get("language") or "")
+        if not parsed.get("text"):
+            parsed["text"] = str(payload.get("text") or "")
+        return parsed
     if cfg.stt_kind == "gemini":
         return _transcribe_chunked(audio, cfg, 8 * 1024 * 1024, lambda path: _gemini_chunk(path, cfg))
     if cfg.stt_kind == "openai":
@@ -1380,7 +1401,13 @@ def study_schema() -> dict:
         ["texto", "hijos"],
     )
     point = _object_schema(
-        {"tiempo": {"type": "string"}, "texto": {"type": "string"}},
+        {
+            "tiempo": {
+                "type": "string",
+                "description": "Minuto de la captura o de la transcripción donde empieza esta idea. No uses la duración de la clase",
+            },
+            "texto": {"type": "string"},
+        },
         ["tiempo", "texto"],
     )
     term = _object_schema(
@@ -1397,6 +1424,19 @@ def study_schema() -> dict:
     quiz = _object_schema(
         {"pregunta": {"type": "string"}, "respuesta": {"type": "string"}},
         ["pregunta", "respuesta"],
+    )
+    caso = _object_schema(
+        {
+            "titulo": {"type": "string", "description": "Nombre corto del caso"},
+            "caso": {"type": "string", "description": "Lo que el profesor contó, sin añadir datos"},
+            "tiempo": {"type": "string", "description": "Minuto en que empieza el caso. Vacío si no se ubica"},
+            "preguntas": {
+                "type": "array",
+                "items": quiz,
+                "description": "Preguntas que el profesor hizo sobre este caso, con la respuesta dicha en la clase",
+            },
+        },
+        ["titulo", "caso", "tiempo", "preguntas"],
     )
     shot = _object_schema(
         {
@@ -1441,6 +1481,7 @@ def study_schema() -> dict:
             "puntos": {"type": "array", "items": point},
             "terminos": {"type": "array", "items": term},
             "repaso": {"type": "array", "items": quiz},
+            "casos": {"type": "array", "items": caso},
             "capturas": {"type": "array", "items": shot},
             "avisos": {"type": "array", "items": aviso},
             "links": {"type": "array", "items": link},
@@ -1448,7 +1489,7 @@ def study_schema() -> dict:
         },
         [
             "titulo", "materia", "sesion", "idea", "dificil", "resumen", "explicacion",
-            "esquema", "puntos", "terminos", "repaso", "capturas", "avisos", "links", "wiki",
+            "esquema", "puntos", "terminos", "repaso", "casos", "capturas", "avisos", "links", "wiki",
         ],
     )
 
@@ -1893,9 +1934,13 @@ def stamp_topics(study: dict, frames: list | None = None, lines: list | None = N
         when = _clean_clock(point.get("tiempo"))
         text = _as_text(point.get("texto"))
         if when and text:
+            seconds = _clock_seconds(when)
+            # An opening line parked at the start names the whole class, not one topic.
+            if seconds <= 1 and (_content_words(text) & _OPENING_WORDS):
+                continue
             anchors.append({
                 "tiempo": when,
-                "seconds": _clock_seconds(when),
+                "seconds": seconds,
                 "words": _content_words(text),
             })
     for shot in study.get("capturas") or []:
@@ -1932,6 +1977,130 @@ def stamp_topics(study: dict, frames: list | None = None, lines: list | None = N
         if when:
             part["tiempo"] = when
     after = [part.get("tiempo") or "" for part in parts]
+    return before != after
+
+
+_OPENING_WORDS = frozenset(
+    "inicio introduccion objetivo planteamiento presentacion participantes bienvenida apertura".split()
+)
+_POINT_NEAR = 20.0
+
+
+def _slide_anchors(study: dict, frames: list | None) -> list[dict]:
+    anchors = []
+    if not frames:
+        return anchors
+    for shot in study.get("capturas") or []:
+        if not isinstance(shot, dict):
+            continue
+        try:
+            index = int(shot.get("indice"))
+        except (TypeError, ValueError):
+            continue
+        if index < 1 or index > len(frames):
+            continue
+        frame = frames[index - 1]
+        if not isinstance(frame, dict):
+            continue
+        text = _as_text(shot.get("que_muestra"))
+        words = _content_words(text)
+        if not words:
+            continue
+        seconds = float(frame.get("time") or 0)
+        anchors.append({
+            "tiempo": fmt_time(seconds),
+            "seconds": seconds,
+            "words": words,
+        })
+    return anchors
+
+
+def _line_anchors(lines: list | None) -> list[dict]:
+    rows = [line for line in (lines or []) if isinstance(line, dict) and _as_text(line.get("text"))]
+    if len(rows) <= 1:
+        return []
+    anchors = []
+    for line in rows:
+        words = _content_words(line.get("text"))
+        if not words:
+            continue
+        when = _clean_clock(line.get("stamp")) or fmt_time(float(line.get("time") or 0))
+        seconds = float(line.get("time") or 0) or _clock_seconds(when)
+        anchors.append({"tiempo": when, "seconds": seconds, "words": words})
+    return anchors
+
+
+def _best_point_anchor(text: str, anchors: list[dict]) -> tuple[int, dict | None]:
+    words = _content_words(text)
+    best_score = 0
+    best = None
+    if not words:
+        return 0, None
+    for anchor in anchors:
+        score = _overlap(words, anchor["words"])
+        if score < 1:
+            continue
+        if best is None or score > best_score or (score == best_score and anchor["seconds"] >= best["seconds"]):
+            best_score = score
+            best = anchor
+    return best_score, best
+
+
+def _nearby_score(text: str, anchors: list[dict], seconds: float) -> int:
+    words = _content_words(text)
+    best = 0
+    for anchor in anchors:
+        if abs(anchor["seconds"] - seconds) > _POINT_NEAR:
+            continue
+        best = max(best, _overlap(words, anchor["words"]))
+    return best
+
+
+def stamp_points(study: dict, frames: list | None = None, lines: list | None = None) -> bool:
+    """Move a summary marker off the file-end stamp, or off 0:00 when a slide matches the text."""
+    points = [
+        point for point in (study.get("puntos") or [])
+        if isinstance(point, dict) and _as_text(point.get("texto"))
+    ]
+    before = [(point.get("tiempo"), point.get("texto")) for point in points]
+    anchors = _slide_anchors(study, frames) + _line_anchors(lines)
+    blocked = _blocked_seconds(lines)
+    anchors = [
+        anchor for anchor in anchors
+        if not any(abs(anchor["seconds"] - mark) <= 2 for mark in blocked)
+    ]
+    for point in points:
+        text = _as_text(point.get("texto"))
+        raw = _clean_clock(point.get("tiempo"))
+        seconds = _clock_seconds(raw) if raw else 0.0
+        untrusted = (not raw) or any(abs(seconds - mark) <= 2 for mark in blocked)
+        best_score, best = _best_point_anchor(text, anchors)
+        opening = bool(_content_words(text) & _OPENING_WORDS)
+        if untrusted and opening and best_score < 2:
+            point["tiempo"] = "0:00"
+            continue
+        if untrusted:
+            point["tiempo"] = best["tiempo"] if best is not None and best_score >= 1 else "0:00"
+            continue
+        local = _nearby_score(text, anchors, seconds)
+        if seconds <= 1 and best is not None and local < best_score and (best_score >= 2 or not opening):
+            point["tiempo"] = best["tiempo"]
+            continue
+        if (
+            best is not None
+            and best_score >= 2
+            and best_score > local
+            and abs(seconds - best["seconds"]) > _POINT_NEAR
+        ):
+            point["tiempo"] = best["tiempo"]
+            continue
+        point["tiempo"] = raw or "0:00"
+    ordered = sorted(
+        enumerate(points),
+        key=lambda item: (_clock_seconds(_clean_clock(item[1].get("tiempo")) or "0:00"), item[0]),
+    )
+    study["puntos"] = [point for _, point in ordered]
+    after = [(point.get("tiempo"), point.get("texto")) for point in study["puntos"]]
     return before != after
 
 
@@ -2221,6 +2390,7 @@ def normalize_study(data: dict, corpus: str = "") -> dict:
         "puntos": [],
         "terminos": [],
         "repaso": [],
+        "casos": [],
         "capturas": [],
         "avisos": [],
         "links": [],
@@ -2283,6 +2453,30 @@ def normalize_study(data: dict, corpus: str = "") -> dict:
                 "pregunta": _as_text(item.get("pregunta")),
                 "respuesta": _as_text(item.get("respuesta")),
             })
+    for item in data.get("casos") or []:
+        if not isinstance(item, dict):
+            continue
+        body = _as_text(item.get("caso"))
+        if not body:
+            continue
+        questions = []
+        for question in item.get("preguntas") or []:
+            if not isinstance(question, dict) or not _as_text(question.get("pregunta")):
+                continue
+            questions.append({
+                "pregunta": _as_text(question.get("pregunta"))[:300],
+                "respuesta": _as_text(question.get("respuesta"))[:800] or "En la clase no se cerró la respuesta.",
+            })
+            if len(questions) >= 6:
+                break
+        study["casos"].append({
+            "titulo": (_as_text(item.get("titulo")) or "Caso")[:140],
+            "caso": body[:2000],
+            "tiempo": _clean_clock(item.get("tiempo")),
+            "preguntas": questions,
+        })
+        if len(study["casos"]) >= 8:
+            break
     for item in data.get("capturas") or []:
         if not isinstance(item, dict):
             continue
@@ -2408,11 +2602,15 @@ Cómo escribir:
 - El esquema es un mapa corto para repasar. Cada rama se entiende sola.
 - Los tiempos salen de la transcripción, en MM:SS o H:MM:SS.
 - Cada parte de explicacion lleva tiempo: el minuto en que empieza ese tema. Es el marcador para saltar el video a esa explicación. Tiene que coincidir con la transcripción o con la captura de ese momento. Si no se puede ubicar, va vacío. No inventes un minuto.
+- Los puntos del resumen también son marcadores, en el orden del video. Cada uno salta a un momento distinto. tiempo es el minuto de la captura o de la transcripción donde empieza esa idea. No uses la duración del archivo ni el último segundo. No pongas 0:00 si el tema aparece más adelante. Reparte los puntos a lo largo de la clase.
 - Si una captura es solo la cara, el chat de Zoom o una pantalla quieta, no la trates como contenido.
 - El índice de cada captura empieza en 1. Si no hay capturas, la lista va vacía.
 - No inventes fórmulas, fechas ni ejemplos que la clase no haya dicho.
 - Si hay un enlace de YouTube en la transcripción o en una captura, ponlo en videos de la parte de la explicación que trata ese tema. No inventes enlaces ni busques otros videos. url es la dirección completa, titulo dice de qué trata y tiempo es el minuto de la clase en que apareció. Si no hay, videos va vacío.
 - Links: copia cada dirección web que se diga o que se lea en una diapositiva, también si no es de YouTube. url es la dirección completa, titulo dice de qué es y tiempo es el minuto de la clase. No inventes direcciones. Si no hay, links va vacío.
+- Casos: solo si el profesor presentó un caso, una viñeta, un paciente o una situación para resolverla en clase. Si no hubo, casos va vacío. No conviertas un ejemplo suelto en un caso y no inventes pacientes ni datos.
+- Cada caso lleva titulo corto, caso con lo que se contó, y tiempo del minuto en que empieza. Si no se ubica, tiempo va vacío.
+- preguntas son las que el profesor hizo sobre ese caso. respuesta es la que se concluyó en la clase. No completes una respuesta que nadie dijo. Si la pregunta quedó abierta, escribe "En la clase no se cerró la respuesta." Si presentó el caso y no preguntó nada, preguntas va vacío.
 - Avisos: solo lo que el profesor encargó o anunció. Tarea, lectura, exposición, reunión, examen, entrega, foro o cualquier trabajo con fecha. Si no hubo nada de eso, avisos va vacío.
 - La fecha se copia como se dijo, por ejemplo "el viernes" o "15 de noviembre" o "la próxima clase". Si no se dijo cuándo hay que presentarlo, fecha va vacía. No calcules un día que nadie mencionó.
 - Si hay un texto o una lectura para hacer la tarea, cópialo en texto cuando se leyó o se ve en una captura. Si solo se nombró un libro o un capítulo, no inventes el contenido: deja texto vacío, pon el título y di en donde_ver en qué minuto del video está.
@@ -2421,7 +2619,7 @@ Cómo escribir:
 - tiempo es el momento de la transcripción en que se encarga, en MM:SS o H:MM:SS.
 - wiki: pocas expresiones de la explicación que, al abrirlas en Wikipedia, ayuden a entender mejor o a ver una imagen. Sirve una estructura, un esquema con nombre, una teoría o un autor con su idea. Por ejemplo, si la explicación dice "homúnculo de Penfield", frase es "homúnculo de Penfield" y articulo es "Homúnculo cortical". frase es el texto exacto, tal como aparece en la explicación, y puede tener varias palabras. articulo es el título del artículo en español. Si solo existe en inglés, el título en inglés. No escribas la dirección. No marques palabras comunes ni lo que ya quedó claro con una frase. Si no hay nada que valga la pena, wiki va vacío. Como mucho 8.
 
-Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dificil, resumen, explicacion, esquema, puntos, terminos, repaso, capturas, avisos, links y wiki. Sin texto fuera del JSON.
+Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dificil, resumen, explicacion, esquema, puntos, terminos, repaso, casos, capturas, avisos, links y wiki. Sin texto fuera del JSON.
 """
     content.append({"type": "input_text", "text": prompt})
     messages = [
@@ -2443,6 +2641,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     def finish(text: str) -> dict:
         study = place_youtube(normalize_study(parse_json_text(text), spoken), lines)
         study["wiki"] = resolve_wiki(study.get("wiki") or [], _explanation_corpus(study))
+        stamp_points(study, frames, lines)
         stamp_topics(study, frames, lines)
         return study
 
@@ -2502,6 +2701,20 @@ def self_test() -> None:
     assert lines[0]["speaker"] == "Persona 1"
     assert lines[0]["text"] == "Hoy vemos ATP"
     assert lines[1]["speaker"] == "Persona 2"
+    collapsed = group_lines({
+        "text": "clase larga",
+        "words": [
+            {"text": "clase", "start": 4799.99},
+            {"text": "larga", "start": 4800.0},
+        ],
+    })
+    assert len(collapsed) == 1
+    assert collapsed[0]["stamp"] == ""
+    assert collapsed[0]["time"] == 0
+    assert collapsed[0]["text"] == "clase larga"
+    assert "1:20:00" not in lines_to_text([
+        {"time": 4799.99, "stamp": "1:20:00", "speaker": "Voz", "text": "toda la clase"},
+    ])
     frames = select_frames(
         [
             {"time": 1, "bits": 1, "avg": 100},
@@ -2523,6 +2736,15 @@ def self_test() -> None:
         "puntos": [{"tiempo": "1:00", "texto": "Empieza el ejemplo"}],
         "terminos": [{"termino": "Clorofila", "definicion": "Pigmento verde"}],
         "repaso": [{"pregunta": "¿Qué absorbe la luz?", "respuesta": "La clorofila"}],
+        "casos": [{
+            "titulo": "Hoja a la sombra",
+            "caso": "Una hoja deja de recibir luz directa.",
+            "tiempo": "8:10",
+            "preguntas": [
+                {"pregunta": "¿Qué deja de hacer?", "respuesta": "De fabricar alimento con la luz."},
+                {"pregunta": "", "respuesta": "Esto no cuenta."},
+            ],
+        }, {"caso": "", "titulo": "Inventado", "preguntas": []}],
         "capturas": [{"indice": 1, "que_muestra": "Esquema", "por_que_importa": "Resume el proceso"}],
         "avisos": [{
             "tipo": "exposición",
@@ -2536,6 +2758,13 @@ def self_test() -> None:
             "donde_ver": "La consigna está en la diapositiva.",
         }],
     })
+    assert packed["casos"][0]["titulo"] == "Hoja a la sombra"
+    assert packed["casos"][0]["tiempo"] == "8:10"
+    assert packed["casos"][0]["preguntas"] == [{
+        "pregunta": "¿Qué deja de hacer?",
+        "respuesta": "De fabricar alimento con la luz.",
+    }]
+    assert len(packed["casos"]) == 1
     assert packed["explicacion"][0]["ejemplo"] == "La hoja verde."
     assert packed["explicacion"][0]["tiempo"] == ""
     kept = normalize_study({
@@ -2573,6 +2802,64 @@ def self_test() -> None:
     }
     assert stamp_topics(lone, None, [{"time": 4319.9, "stamp": "1:12:00", "text": "clase"}]) is False
     assert lone["explicacion"][0]["tiempo"] == ""
+    marked_points = {
+        "puntos": [
+            {"tiempo": "1:20:00", "texto": "Introducción: qué es praxia y por qué importa"},
+            {"tiempo": "9:17", "texto": "Bases neuroanatómicas de la praxia"},
+            {"tiempo": "0:00", "texto": "Tipos de apraxia ideomotora"},
+        ],
+        "capturas": [
+            {"indice": 1, "que_muestra": "Pantalla inicial del presentador"},
+            {"indice": 2, "que_muestra": "Bases biológicas de la praxia"},
+            {"indice": 3, "que_muestra": "Definición de apraxia y áreas cerebrales"},
+        ],
+    }
+    point_frames = [{"time": 0, "file": "01.jpg"}, {"time": 557, "file": "02.jpg"}, {"time": 1060, "file": "03.jpg"}]
+    point_lines = [{"time": 4799.99, "stamp": "1:20:00", "text": "toda la clase"}]
+    assert stamp_points(marked_points, point_frames, point_lines)
+    assert marked_points["puntos"][0]["tiempo"] == "0:00"
+    assert marked_points["puntos"][0]["texto"].startswith("Introducción")
+    assert marked_points["puntos"][1]["tiempo"] == "9:17"
+    assert marked_points["puntos"][2]["tiempo"] == "17:40"
+    assert stamp_points(marked_points, point_frames, point_lines) is False
+    healthy = {
+        "puntos": [{"tiempo": "26:11", "texto": "Evolución histórica de la salud pública mundial"}],
+        "capturas": [
+            {"indice": 1, "que_muestra": "Evolución histórica mundial de la salud pública, periodo 1500"},
+            {"indice": 2, "que_muestra": "Historia de la salud pública en el Perú"},
+        ],
+    }
+    assert stamp_points(
+        healthy,
+        [{"time": 1571, "file": "01.jpg"}, {"time": 1979, "file": "02.jpg"}],
+        [{"time": 4319.96, "stamp": "1:12:00", "text": "clase"}],
+    ) is False
+    assert healthy["puntos"][0]["tiempo"] == "26:11"
+    quiet = {
+        "puntos": [{"tiempo": "8:08", "texto": "Controla la pupila"}],
+        "capturas": [
+            {"indice": 1, "que_muestra": "Definición general del tema"},
+            {"indice": 2, "que_muestra": "La pupila se dilata con la luz"},
+        ],
+    }
+    assert stamp_points(
+        quiet,
+        [{"time": 488, "file": "01.jpg"}, {"time": 1200, "file": "02.jpg"}],
+        None,
+    ) is False
+    assert quiet["puntos"][0]["tiempo"] == "8:08"
+    opening = {
+        "explicacion": [{"titulo": "Relación SNA y comportamiento", "texto": "Se conecta.", "ejemplo": "", "tiempo": ""}],
+        "puntos": [{
+            "tiempo": "1:12:00",
+            "texto": "Inicio de clase y planteamiento del objetivo: comprender el SNA y su relación con el comportamiento.",
+        }],
+        "capturas": [{"indice": 1, "que_muestra": "Pantalla con el nombre del presentador"}],
+    }
+    assert stamp_points(opening, [{"time": 0, "file": "01.jpg"}], [{"time": 4319.96, "stamp": "1:12:00", "text": "clase"}])
+    assert opening["puntos"][0]["tiempo"] == "0:00"
+    assert stamp_topics(opening, [{"time": 0, "file": "01.jpg"}], [{"time": 4319.96, "stamp": "1:12:00", "text": "clase"}]) is False
+    assert opening["explicacion"][0]["tiempo"] == ""
     assert youtube_url("https://youtu.be/dQw4w9WgXcQ?t=30") == "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30"
     assert youtube_url("javascript:alert(1)") == ""
     placed = place_youtube(normalize_study({

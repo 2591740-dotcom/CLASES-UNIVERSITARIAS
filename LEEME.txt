@@ -78,8 +78,13 @@ y la carrera, y entra enseguida, igual que la página.
 Escuchar lee en voz alta la pestaña que estás viendo:
 explicación, resumen, esquema, glosario, repaso, avisos,
 capturas o transcripción. Detener la corta. Si das play al
-video o cambias de pestaña, también se detiene. Usa la voz en
-español del navegador o del teléfono, y no gasta la clave.
+video o cambias de pestaña, también se detiene. El botón de
+al lado marca la velocidad: 1×, 1,25×, 1,5× y 2×. Queda
+guardada en ese aparato. Usa la voz en español del navegador
+o del teléfono, y no gasta la clave. En la clase, al bajar,
+el video de YouTube queda en una miniatura. Ocultar la
+deja en una pestaña Ver y el audio sigue. Sirve en la página
+y en el teléfono.
 
 El costo depende del proveedor. Con Grok, la transcripción
 cuesta unos 0,10 USD por hora de audio y la explicación es

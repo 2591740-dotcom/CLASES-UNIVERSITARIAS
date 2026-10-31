@@ -100,7 +100,9 @@ def publish(class_id: str) -> None:
     if isinstance(study, dict) and study:
         study = engine.place_youtube(study, lines)
         study["links"] = engine.collect_links(study, lines)
-        if engine.stamp_topics(study, meta.get("frames") or [], lines):
+        changed = engine.stamp_points(study, meta.get("frames") or [], lines)
+        changed = engine.stamp_topics(study, meta.get("frames") or [], lines) or changed
+        if changed:
             (folder / "study.json").write_text(
                 json.dumps(study, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -121,6 +123,9 @@ def publish(class_id: str) -> None:
         "estado": "lista" if meta.get("status") == "ready" else (meta.get("status") or "error"),
         "detalle": (meta.get("detail") or "")[:300],
     }
+    curso = _curso_id(meta.get("curso_id") or "")
+    if curso:
+        row["curso_id"] = curso
     remote_url = ""
     remote = _request(
         "GET",
@@ -536,6 +541,101 @@ def _download_object(path: str) -> bytes:
         raise engine.AppError("Faltó una parte del video enviado desde el teléfono.") from exc
     except urllib.error.URLError as exc:
         raise engine.AppError("No pude bajar el video enviado desde el teléfono.") from exc
+
+
+PC_UNIVERSIDAD = "Universidad César Vallejo"
+PC_CARRERA = "Psicología"
+
+
+def _curso_id(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) == 36 and text.count("-") == 4 and all(piece.isalnum() for piece in text.split("-")):
+        return text
+    return ""
+
+
+def list_cursos() -> list[dict]:
+    if not configured():
+        return []
+    uni = urllib.parse.quote(PC_UNIVERSIDAD)
+    carrera = urllib.parse.quote(PC_CARRERA)
+    rows = _request(
+        "GET",
+        f"/rest/v1/cursos?select=id,nombre,creado&universidad=eq.{uni}&carrera=eq.{carrera}&order=creado.asc",
+    )
+    return rows if isinstance(rows, list) else []
+
+
+def curso_por_clase() -> dict[str, str]:
+    if not configured():
+        return {}
+    rows = _request("GET", "/rest/v1/clases?select=id,curso_id")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        str(row.get("id") or ""): str(row.get("curso_id") or "")
+        for row in rows
+        if row.get("id")
+    }
+
+
+def _nombre_curso(nombre: str) -> str:
+    text = " ".join(str(nombre or "").split())
+    if not text:
+        raise engine.AppError("Escribe el nombre del curso.")
+    if len(text) > 80:
+        raise engine.AppError("El nombre del curso es muy largo.")
+    return text
+
+
+def crear_curso(nombre: str) -> dict:
+    limpio = _nombre_curso(nombre)
+    try:
+        _request(
+            "POST",
+            "/rest/v1/cursos",
+            {"universidad": PC_UNIVERSIDAD, "carrera": PC_CARRERA, "nombre": limpio},
+            prefer="return=minimal",
+        )
+    except engine.AppError as exc:
+        if "23505" in str(exc) or "duplicate" in str(exc).lower():
+            raise engine.AppError("Ya hay un curso con ese nombre.") from exc
+        raise
+    creado = next((row for row in list_cursos() if row.get("nombre") == limpio), None)
+    if not isinstance(creado, dict):
+        raise engine.AppError("No pude crear el curso.")
+    return creado
+
+
+def renombrar_curso(curso_id: str, nombre: str) -> dict:
+    curso = _curso_id(curso_id)
+    if not curso:
+        raise engine.AppError("No encuentro ese curso.")
+    limpio = _nombre_curso(nombre)
+    try:
+        _request(
+            "PATCH",
+            f"/rest/v1/cursos?id=eq.{curso}",
+            {"nombre": limpio},
+            prefer="return=minimal",
+        )
+    except engine.AppError as exc:
+        if "23505" in str(exc) or "duplicate" in str(exc).lower():
+            raise engine.AppError("Ya hay un curso con ese nombre.") from exc
+        raise
+    return {"id": curso, "nombre": limpio}
+
+
+def asignar_curso(class_id: str, curso_id: str) -> None:
+    curso = _curso_id(curso_id)
+    if not curso or not _valid_id(class_id):
+        raise engine.AppError("Elige un curso.")
+    _request(
+        "PATCH",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}",
+        {"curso_id": curso},
+        prefer="return=minimal",
+    )
 
 
 def self_test() -> None:

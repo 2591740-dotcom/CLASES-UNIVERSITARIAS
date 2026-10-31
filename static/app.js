@@ -143,6 +143,147 @@ function linkWiki(html, wiki) {
   }).join("");
 }
 
+const wikiSummaries = new Map();
+let wikiPeekPlace = null;
+let wikiPeekCloser = null;
+
+function wikiTarget(href) {
+  let parsed;
+  try { parsed = new URL(href); } catch { return null; }
+  const lang = parsed.hostname.split(".")[0].toLowerCase();
+  if (!/^[a-z]{2,3}$/.test(lang)) return null;
+  if (parsed.pathname.startsWith("/wiki/")) {
+    let title = parsed.pathname.slice(6);
+    try { title = decodeURIComponent(title); } catch { /* el título ya venía legible */ }
+    title = title.replace(/_/g, " ").trim();
+    return title ? { lang, title } : null;
+  }
+  if (parsed.pathname === "/w/index.php") {
+    const search = (parsed.searchParams.get("search") || "").trim();
+    return search ? { lang, search } : null;
+  }
+  return null;
+}
+
+function shortWiki(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= 320) return clean;
+  const cut = clean.slice(0, 320);
+  const dot = cut.lastIndexOf(". ");
+  return dot >= 80 ? cut.slice(0, dot + 1) : `${cut.trim()}…`;
+}
+
+async function wikiExtract(lang, title) {
+  const slug = encodeURIComponent(title.replace(/ /g, "_"));
+  const response = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${slug}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) return "";
+  const data = await response.json().catch(() => ({}));
+  return shortWiki(data.extract || data.description || "");
+}
+
+async function wikiSearchTitle(lang, search) {
+  const params = new URLSearchParams({
+    origin: "*",
+    format: "json",
+    action: "query",
+    list: "search",
+    srlimit: "1",
+    srsearch: search,
+  });
+  const response = await fetch(`https://${lang}.wikipedia.org/w/api.php?${params}`);
+  if (!response.ok) return "";
+  const data = await response.json().catch(() => ({}));
+  const hit = data.query && data.query.search && data.query.search[0];
+  return hit ? String(hit.title || "") : "";
+}
+
+async function wikiSummary(href) {
+  if (wikiSummaries.has(href)) return wikiSummaries.get(href);
+  const target = wikiTarget(href);
+  let text = "";
+  if (target && target.title) text = await wikiExtract(target.lang, target.title);
+  else if (target && target.search) {
+    const title = await wikiSearchTitle(target.lang, target.search);
+    if (title) text = await wikiExtract(target.lang, title);
+  }
+  const summary = text || "Toca para abrir Wikipedia.";
+  wikiSummaries.set(href, summary);
+  return summary;
+}
+
+function closeWikiPeek() {
+  document.querySelector(".wiki-peek")?.remove();
+  if (wikiPeekPlace) {
+    window.removeEventListener("scroll", wikiPeekPlace, true);
+    window.removeEventListener("resize", wikiPeekPlace);
+    wikiPeekPlace = null;
+  }
+  if (wikiPeekCloser) {
+    document.removeEventListener("pointerdown", wikiPeekCloser, true);
+    wikiPeekCloser = null;
+  }
+}
+
+function placeWikiPeek(pop, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  const width = pop.offsetWidth;
+  const height = pop.offsetHeight;
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) left = window.innerWidth - margin - width;
+  if (left < margin) left = margin;
+  let top = rect.bottom + 4;
+  if (top + height > window.innerHeight - margin) top = rect.top - height - 4;
+  if (top < margin) top = margin;
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
+}
+
+function openWikiPeek(anchor) {
+  closeWikiPeek();
+  const pop = document.createElement("a");
+  pop.className = "wiki-peek";
+  pop.href = anchor.href;
+  pop.target = "_blank";
+  pop.rel = "noreferrer";
+  pop.setAttribute("aria-label", "Resumen. Toca para abrir Wikipedia.");
+  pop.innerHTML = `<span class="wiki-peek-text">Buscando…</span>`;
+  document.body.appendChild(pop);
+  const place = () => {
+    if (!pop.isConnected) return;
+    if (!anchor.isConnected) {
+      closeWikiPeek();
+      return;
+    }
+    placeWikiPeek(pop, anchor);
+  };
+  wikiPeekPlace = place;
+  place();
+  window.addEventListener("scroll", place, true);
+  window.addEventListener("resize", place);
+  wikiPeekCloser = (event) => {
+    if (pop.contains(event.target)) return;
+    closeWikiPeek();
+  };
+  document.addEventListener("pointerdown", wikiPeekCloser, true);
+  pop.addEventListener("click", () => {
+    setTimeout(closeWikiPeek, 0);
+  });
+  wikiSummary(anchor.href).then((text) => {
+    if (!pop.isConnected) return;
+    const line = pop.querySelector(".wiki-peek-text");
+    if (line) line.textContent = text;
+    place();
+  }).catch(() => {
+    if (!pop.isConnected) return;
+    const line = pop.querySelector(".wiki-peek-text");
+    if (line) line.textContent = "Toca para abrir Wikipedia.";
+    place();
+  });
+}
+
 function applyFondo(value) {
   const fondo = value === "oscuro" ? "oscuro" : "claro";
   if (fondo === "oscuro") document.documentElement.setAttribute("data-fondo", "oscuro");
@@ -448,28 +589,30 @@ function phoneHome(classes, cursos) {
     <div class="grid">${mine}</div>`;
 }
 
-function homeHtml(classes, recordings, status, cursos) {
+function homeHtml(classes, status, cursos) {
   const list = Array.isArray(classes) ? classes : [];
-  const found = Array.isArray(recordings) ? recordings : [];
   const state = status || {};
   if (window.claseClaraCloud) return phoneHome(list, cursos);
-  const mine = list.length
-    ? list.map(cardHtml).join("")
-    : '<p class="empty">Todavía no hay clases. La primera aparece aquí.</p>';
-  const zoom = found.length
-    ? found.map((item) => `
-      <article class="card">
-        <h3>${esc(item.name)}</h3>
-        <p>${esc(item.when)} · ${esc(item.size_mb)} MB</p>
-        <div class="actions"><button class="primary use-zoom" type="button" data-path="${esc(item.path)}">Procesar</button></div>
-      </article>`).join("")
-    : '<p class="empty">No veo grabaciones en Documentos\\Zoom.</p>';
+  const pack = cursos || { items: [], activo: "", nombre: "" };
+  const primero = pack.items[0] ? pack.items[0].id : "";
+  const conocidos = new Set(pack.items.map((item) => item.id));
+  const visibles = pack.activo
+    ? list.filter((item) => {
+      if (item.curso_id && !conocidos.has(item.curso_id)) return true;
+      return (item.curso_id || primero) === pack.activo;
+    })
+    : list;
+  const mine = visibles.length
+    ? visibles.map(cardHtml).join("")
+    : pack.nombre
+      ? `<p class="empty">Todavía no hay clases en ${esc(pack.nombre)}.</p>`
+      : '<p class="empty">Todavía no hay clases. La primera aparece aquí.</p>';
   const ffmpeg = state.ffmpeg ? "" : '<p class="banner">Falta ffmpeg en esta computadora. Sin eso no puedo sacar el audio ni las capturas.</p>';
   return `
     <section class="hero">
       <p class="kicker">Tu clase, en claro</p>
+      <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
       <h1>Entiende la clase sin volver a verla entera.</h1>
-      <p class="lede">No entra a Zoom. Lee el video que ya descargaste, se queda con lo que se dijo y con las pantallas que cambian, y te lo explica para estudiar.</p>
       ${ffmpeg}
     </section>
     <section class="panel">
@@ -480,12 +623,10 @@ function homeHtml(classes, recordings, status, cursos) {
           <button class="ghost" id="pick" type="button">Elegir video</button>
           <button class="primary" id="go" type="button">Procesar</button>
         </div>
-        <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. La materia y el número de sesión salen de la transcripción; si quedan mal, se corrigen en la clase.</p>
+        <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. El nombre de la clase sale de lo que se dijo; si queda mal, se corrige al abrirla.</p>
       </div>
     </section>
-    <h2>Grabaciones de Zoom</h2>
-    <div class="grid">${zoom}</div>
-    <h2>Clases ya hechas</h2>
+    <h2>${esc(pack.nombre || "Clases ya hechas")}</h2>
     <div class="grid">${mine}</div>`;
 }
 
@@ -499,12 +640,80 @@ function cardHtml(item) {
       <span class="status ${esc(item.status)}">${esc(state)}</span>
       ${flag}
       <h3>${esc(item.title || "Clase")}</h3>
-      <p>${esc(item.materia || "")} ${esc(extra || "")}</p>
+      ${extra ? `<p>${esc(extra)}</p>` : ""}
       <div class="actions">
         <button class="primary open-class" type="button" data-id="${esc(item.id)}">Abrir</button>
         <button class="ghost danger delete-class" type="button" data-id="${esc(item.id)}">Borrar</button>
       </div>
     </article>`;
+}
+
+const CURSO_PC = "Universidad César Vallejo\u0000Psicología";
+
+function guardarCursoPc(items, activo) {
+  const lista = Array.isArray(items) ? items : [];
+  const id = lista.some((item) => item.id === activo) ? activo : (lista[0] ? lista[0].id : "");
+  let all = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem("cc-curso") || "{}");
+    if (parsed && typeof parsed === "object") all = parsed;
+  } catch { /* se guarda de nuevo */ }
+  if (id) all[CURSO_PC] = id;
+  else delete all[CURSO_PC];
+  localStorage.setItem("cc-curso", JSON.stringify(all));
+  const actual = lista.find((item) => item.id === id);
+  const pack = { items: lista, activo: id, nombre: actual ? actual.nombre : "" };
+  window.CLASECLARA_CURSOS = pack;
+  return pack;
+}
+
+function resolverCursoPc(cursos) {
+  const items = (cursos && cursos.items) || [];
+  let saved = "";
+  try {
+    const all = JSON.parse(localStorage.getItem("cc-curso") || "{}");
+    saved = all && all[CURSO_PC] ? all[CURSO_PC] : "";
+  } catch { /* sigue el primer curso */ }
+  return guardarCursoPc(items, saved);
+}
+
+function cursoAccion() {
+  if (window.claseClaraCloud) return window.claseClaraCloud;
+  return {
+    elegirCurso(id) {
+      const pack = window.CLASECLARA_CURSOS || { items: [] };
+      if (!pack.items.some((item) => item.id === id)) throw new Error("No encuentro ese curso.");
+      return guardarCursoPc(pack.items, id);
+    },
+    async crearCurso(nombre) {
+      const data = await api("/api/cursos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nombre }),
+      });
+      const limpio = String(nombre || "").trim().replace(/\s+/g, " ");
+      const items = data.items || [];
+      const creado = [...items].reverse().find((item) => item.nombre === limpio);
+      if (!creado) throw new Error("No pude crear el curso.");
+      return guardarCursoPc(items, creado.id);
+    },
+    async renombrarCurso(id, nombre) {
+      const data = await api(`/api/cursos/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nombre }),
+      });
+      const activo = (window.CLASECLARA_CURSOS && window.CLASECLARA_CURSOS.activo) || id;
+      return guardarCursoPc(data.items || [], activo);
+    },
+    async asignarCurso(classId, cursoId) {
+      await api(`/api/classes/${classId}/curso`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ curso_id: cursoId }),
+      });
+    },
+  };
 }
 
 function cerrarCursoModal() {
@@ -516,25 +725,112 @@ function onCursoEscape(event) {
   if (event.key === "Escape") cerrarCursoModal();
 }
 
+let cursoEditHasta = 0;
+
+function marcarFinEdicion() {
+  cursoEditHasta = Date.now() + 450;
+}
+
+function clicDeEdicion() {
+  return Date.now() < cursoEditHasta;
+}
+
+function alTocarCurso(elemento, alUnToque, alDosToques) {
+  let toques = 0;
+  let espera = 0;
+  elemento.addEventListener("click", (event) => {
+    if (clicDeEdicion() || elemento.hidden || elemento.dataset.editando === "1") return;
+    toques += 1;
+    if (toques === 1) {
+      espera = window.setTimeout(() => {
+        toques = 0;
+        alUnToque();
+      }, 500);
+      return;
+    }
+    window.clearTimeout(espera);
+    toques = 0;
+    event.preventDefault();
+    alDosToques();
+  });
+}
+
+function nombreCursoNuevo() {
+  const items = (window.CLASECLARA_CURSOS && window.CLASECLARA_CURSOS.items) || [];
+  const nombres = new Set(items.map((item) => item.nombre));
+  let nombre = "Curso nuevo";
+  let numero = 2;
+  while (nombres.has(nombre)) {
+    nombre = `Curso nuevo ${numero}`;
+    numero += 1;
+  }
+  return nombre;
+}
+
+function editarNombreCurso(origen, cursoId, alTerminar) {
+  if (!cursoId || origen.dataset.editando === "1") return;
+  origen.dataset.editando = "1";
+  const previo = (origen.textContent || "").trim();
+  const input = document.createElement("input");
+  input.className = "capsule-edit";
+  input.type = "text";
+  input.maxLength = 80;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.value = previo === "Curso" ? "" : previo;
+  input.setAttribute("aria-label", "Nombre del curso");
+  origen.hidden = true;
+  origen.insertAdjacentElement("afterend", input);
+  input.focus();
+  input.select();
+  let listo = false;
+  const terminar = async (guardar) => {
+    if (listo) return;
+    listo = true;
+    marcarFinEdicion();
+    const escrito = input.value.trim().replace(/\s+/g, " ");
+    input.remove();
+    origen.hidden = false;
+    delete origen.dataset.editando;
+    if (!guardar || !escrito || escrito === previo) {
+      origen.textContent = previo || "Curso";
+      if (alTerminar) alTerminar(previo, false);
+      return;
+    }
+    try {
+      const cambiado = await cursoAccion().renombrarCurso(cursoId, escrito);
+      const final = (cambiado.items.find((item) => item.id === cursoId) || {}).nombre || escrito;
+      origen.textContent = final;
+      if (clase && clase.curso_id === cursoId) clase.curso = final;
+      if (alTerminar) alTerminar(final, true);
+    } catch (error) {
+      origen.textContent = previo || "Curso";
+      alert(error.message);
+      if (alTerminar) alTerminar(previo, false);
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      terminar(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      terminar(false);
+    }
+  });
+  input.addEventListener("blur", () => terminar(true));
+}
+
 function abrirCursoModal(destino) {
   cerrarCursoModal();
   const pack = window.CLASECLARA_CURSOS || { items: [], activo: "", nombre: "" };
   const deClase = destino === "clase";
   const actualId = deClase ? (clase && clase.curso_id) || "" : pack.activo;
-  const actualNombre = deClase ? (clase && clase.curso) || "" : pack.nombre;
   const lista = pack.items.map((item) => {
     const on = item.id === actualId ? " on" : "";
     return `<button class="course-pick${on}" type="button" data-id="${esc(item.id)}">${esc(item.nombre)}</button>`;
   }).join("");
-  const renombrar = actualId ? `
-    <form id="curso-renombrar">
-      <label for="curso-rename">Renombrar</label>
-      <input id="curso-rename" type="text" maxlength="80" value="${esc(actualNombre)}">
-      <button class="ghost" type="submit">Renombrar</button>
-    </form>` : "";
-  const copiar = deClase && pack.activo && pack.activo !== actualId
-    ? `<button class="ghost" id="curso-copiar" type="button">Copiar el curso de inicio</button>`
-    : "";
   const modal = document.createElement("div");
   modal.id = "course-modal";
   modal.className = "course-modal";
@@ -542,15 +838,8 @@ function abrirCursoModal(destino) {
     <div class="course-card" role="dialog" aria-modal="true" aria-labelledby="curso-titulo">
       <p class="kicker" id="curso-titulo">Curso</p>
       <div class="course-list">${lista || '<p class="empty">Todavía no hay cursos.</p>'}</div>
-      ${renombrar}
-      <form id="curso-nuevo">
-        <label for="curso-nombre">Curso nuevo</label>
-        <input id="curso-nombre" type="text" maxlength="80" placeholder="Nombre del curso">
-        <button class="primary" type="submit">Curso nuevo</button>
-      </form>
-      ${copiar}
+      <button class="primary" id="curso-agregar" type="button">Agregar curso</button>
       <p class="error" id="curso-error" hidden></p>
-      <div class="row"><button class="ghost" id="curso-cerrar" type="button">Cerrar</button></div>
     </div>`;
   document.body.appendChild(modal);
   document.addEventListener("keydown", onCursoEscape);
@@ -559,115 +848,117 @@ function abrirCursoModal(destino) {
     note.hidden = false;
     note.textContent = error.message || "No pude guardar el curso.";
   };
-  modal.querySelector("#curso-cerrar").onclick = cerrarCursoModal;
   modal.addEventListener("click", (event) => {
     if (event.target === modal) cerrarCursoModal();
   });
+  const usarCurso = async (id, nombre) => {
+    if (deClase) {
+      await cursoAccion().asignarCurso(clase.id, id);
+      clase.curso_id = id;
+      clase.curso = nombre;
+      const capsula = document.querySelector("#clase-curso");
+      if (capsula) capsula.textContent = nombre || "Curso";
+      cerrarCursoModal();
+      return;
+    }
+    cursoAccion().elegirCurso(id);
+    cerrarCursoModal();
+    await showHome();
+  };
   modal.querySelectorAll(".course-pick").forEach((button) => {
-    button.onclick = async () => {
+    const id = button.dataset.id;
+    const elegir = async () => {
       button.disabled = true;
       try {
-        if (deClase) {
-          await window.claseClaraCloud.asignarCurso(clase.id, button.dataset.id);
-          clase.curso_id = button.dataset.id;
-          clase.curso = button.textContent;
-          const capsula = document.querySelector("#clase-curso");
-          if (capsula) capsula.textContent = clase.curso;
-          cerrarCursoModal();
-          return;
-        }
-        window.claseClaraCloud.elegirCurso(button.dataset.id);
-        cerrarCursoModal();
-        await showHome();
+        await usarCurso(id, button.textContent);
       } catch (error) {
         fallo(error);
         button.disabled = false;
       }
     };
+    if (id === actualId) {
+      alTocarCurso(button, elegir, () => {
+        editarNombreCurso(button, id, (nombre, cambio) => {
+          if (!cambio) return;
+          if (deClase) {
+            const capsula = document.querySelector("#clase-curso");
+            if (capsula) capsula.textContent = nombre || "Curso";
+            return;
+          }
+          cerrarCursoModal();
+          showHome();
+        });
+      });
+      return;
+    }
+    button.onclick = () => {
+      if (clicDeEdicion()) return;
+      elegir();
+    };
   });
-  const formNuevo = modal.querySelector("#curso-nuevo");
-  formNuevo.onsubmit = async (event) => {
-    event.preventDefault();
-    formNuevo.querySelector("button").disabled = true;
+  modal.querySelector("#curso-agregar").onclick = async () => {
+    if (clicDeEdicion()) return;
+    const button = modal.querySelector("#curso-agregar");
+    button.disabled = true;
     try {
-      const creado = await window.claseClaraCloud.crearCurso(modal.querySelector("#curso-nombre").value);
+      const creado = await cursoAccion().crearCurso(nombreCursoNuevo());
       if (deClase) {
-        await window.claseClaraCloud.asignarCurso(clase.id, creado.activo);
+        await cursoAccion().asignarCurso(clase.id, creado.activo);
         clase.curso_id = creado.activo;
         clase.curso = creado.nombre;
-        const capsula = document.querySelector("#clase-curso");
-        if (capsula) capsula.textContent = clase.curso || "Curso";
-        cerrarCursoModal();
-        return;
       }
       cerrarCursoModal();
-      await showHome();
+      if (!deClase) await showHome();
+      const capsula = document.querySelector(deClase ? "#clase-curso" : "#curso-capsula");
+      if (capsula) {
+        capsula.textContent = creado.nombre || "Curso";
+        editarNombreCurso(capsula, creado.activo, (nombre, cambio) => {
+          if (!cambio) return;
+          if (deClase && clase) clase.curso = nombre;
+          if (!deClase) showHome();
+        });
+      }
     } catch (error) {
       fallo(error);
-      formNuevo.querySelector("button").disabled = false;
+      button.disabled = false;
     }
   };
-  const formRename = modal.querySelector("#curso-renombrar");
-  if (formRename) {
-    formRename.onsubmit = async (event) => {
-      event.preventDefault();
-      formRename.querySelector("button").disabled = true;
-      try {
-        const cambiado = await window.claseClaraCloud.renombrarCurso(actualId, modal.querySelector("#curso-rename").value);
-        const nombre = (cambiado.items.find((item) => item.id === actualId) || {}).nombre || "";
-        if (deClase && clase && clase.curso_id === actualId) {
-          clase.curso = nombre;
-          const capsula = document.querySelector("#clase-curso");
-          if (capsula) capsula.textContent = nombre || "Curso";
-          cerrarCursoModal();
-          return;
-        }
-        cerrarCursoModal();
-        await showHome();
-      } catch (error) {
-        fallo(error);
-        formRename.querySelector("button").disabled = false;
-      }
-    };
-  }
-  const copiarBtn = modal.querySelector("#curso-copiar");
-  if (copiarBtn) {
-    copiarBtn.onclick = async () => {
-      copiarBtn.disabled = true;
-      try {
-        await window.claseClaraCloud.asignarCurso(clase.id, pack.activo);
-        clase.curso_id = pack.activo;
-        clase.curso = pack.nombre;
-        const capsula = document.querySelector("#clase-curso");
-        if (capsula) capsula.textContent = clase.curso || "Curso";
-        cerrarCursoModal();
-      } catch (error) {
-        fallo(error);
-        copiarBtn.disabled = false;
-      }
-    };
-  }
-  modal.querySelector("#curso-nombre").focus();
 }
 
 async function showHome() {
   cerrarCursoModal();
+  closeWikiPeek();
   stopSpeech();
   stopPoll();
   shown = "";
   clase = null;
   document.title = "ClaseClara";
-  const [status, list, zoom] = await Promise.all([
+  const [status, list] = await Promise.all([
     api("/api/status"),
     api("/api/classes"),
-    api("/api/zoom"),
   ]);
   renderKey(status);
   clearYouTube();
   unbindMiniPlayer();
-  app.innerHTML = homeHtml(list.classes, zoom.recordings, status, list.cursos);
+  const cursos = window.claseClaraCloud ? list.cursos : resolverCursoPc(list.cursos);
+  app.innerHTML = homeHtml(list.classes, status, cursos);
   const capsula = document.querySelector("#curso-capsula");
-  if (capsula) capsula.onclick = () => abrirCursoModal("inicio");
+  if (capsula) {
+    alTocarCurso(
+      capsula,
+      () => abrirCursoModal("inicio"),
+      () => {
+        const pack = window.CLASECLARA_CURSOS;
+        if (!pack || !pack.activo) {
+          abrirCursoModal("inicio");
+          return;
+        }
+        editarNombreCurso(capsula, pack.activo, (_nombre, cambio) => {
+          if (cambio) showHome();
+        });
+      },
+    );
+  }
   const pick = document.querySelector("#pick");
   if (pick) pick.onclick = chooseFile;
   const go = document.querySelector("#go");
@@ -676,9 +967,6 @@ async function showHome() {
       ? saveFromPhone
       : () => startPath(document.querySelector("#path").value.trim());
   }
-  document.querySelectorAll(".use-zoom").forEach((button) => {
-    button.onclick = () => startPath(button.dataset.path);
-  });
   document.querySelectorAll(".open-class").forEach((button) => {
     button.onclick = () => openClass(button.dataset.id);
   });
@@ -877,6 +1165,11 @@ async function startPath(path) {
     alert("Elige un video o pega un enlace.");
     return;
   }
+  const pack = window.CLASECLARA_CURSOS;
+  if (!pack || !pack.activo) {
+    abrirCursoModal("inicio");
+    return;
+  }
   shown = "";
   const isLink = /^https?:\/\//i.test(path);
   renderProcess({ status: "processing", stage: "audio", detail: isLink ? "Bajando el video del enlace" : "Preparando el video", started: Math.floor(Date.now() / 1000) });
@@ -884,7 +1177,7 @@ async function startPath(path) {
     const data = await api("/api/classes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(isLink ? { url: path } : { path }),
+      body: JSON.stringify(isLink ? { url: path, curso_id: pack.activo } : { path, curso_id: pack.activo }),
     });
     watch(data.id);
   } catch (error) {
@@ -940,7 +1233,6 @@ function watch(id) {
 
 async function saveTitle() {
   const input = document.querySelector("#class-title");
-  const course = document.querySelector("#class-course");
   const title = input.value.trim();
   if (!title) {
     alert("Escribe un nombre.");
@@ -952,7 +1244,7 @@ async function saveTitle() {
     const saved = await api(`/api/classes/${clase.id}/title`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, materia: course.value }),
+      body: JSON.stringify({ title, materia: clase.materia || "" }),
     });
     clase.title = saved.title;
     clase.materia = saved.materia;
@@ -1206,6 +1498,7 @@ function studyHtml(data) {
     return frameButton(frameSrc(data, frame.file), durationStamp(frame.time), label, `<span>${esc(label)}</span>`);
   }).join("");
   const player = playerHtml(data);
+  const when = durationLabel(data.duration);
   return `
     <div class="class-tools">
       <button class="ghost" id="back" type="button">Inicio</button>
@@ -1215,8 +1508,8 @@ function studyHtml(data) {
       <section>
         <div class="study-head">
           <div>
-            <p class="kicker">${esc(data.materia || "Clase")} ${esc(durationLabel(data.duration))}</p>
-            ${window.claseClaraCloud ? `<button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>` : ""}
+            ${when ? `<p class="kicker">${esc(when)}</p>` : ""}
+            <button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>
             <h1 id="class-heading">${esc(shownTitle)}</h1>
             <p class="idea">${esc(study.idea || "")}</p>
             <form id="rename" class="rename">
@@ -1224,12 +1517,8 @@ function studyHtml(data) {
                 <label for="class-title">Nombre de la clase</label>
                 <input id="class-title" type="text" maxlength="140" value="${esc(shownTitle)}">
               </div>
-              <div>
-                <label for="class-course">Materia</label>
-                <input id="class-course" type="text" maxlength="120" placeholder="Ejemplo: Psicología · Sesión 4" value="${esc(data.materia || "")}">
-              </div>
               <button class="ghost" type="submit">Guardar</button>
-              <p class="note rename-note">Sale de lo que se dijo en la clase. Cámbiala si el curso o el número de sesión no coinciden.</p>
+              <p class="note rename-note">Sale de lo que se dijo en la clase. Cámbialo si el tema no coincide.</p>
             </form>
           </div>
         </div>
@@ -1239,6 +1528,7 @@ function studyHtml(data) {
         ${noticesBanner(data)}
         <div class="listen">
           <button class="ghost" id="listen" type="button" aria-pressed="false">Escuchar</button>
+          <button class="ghost listen-rate" id="listen-rate" type="button" aria-label="Velocidad de la lectura: ${speechRateLabel(speechRate())}">${speechRateLabel(speechRate())}</button>
           <p class="note" id="listen-note" hidden></p>
         </div>
         <div class="tabs" role="tablist">
@@ -1248,6 +1538,7 @@ function studyHtml(data) {
           ${tab("esquema", "Esquema", false)}
           ${tab("glosario", "Glosario", false)}
           ${tab("repaso", "Repaso", false)}
+          ${(study.casos || []).length ? tab("casos", "Casos", false) : ""}
           ${tab("capturas", "Capturas", false)}
           ${tab("links", "Links", false)}
           ${tab("texto", "Transcripción", false)}
@@ -1259,6 +1550,7 @@ function studyHtml(data) {
           <div data-panel="esquema" hidden>${mapHtml(study)}</div>
           <div data-panel="glosario" hidden>${termsHtml(study)}</div>
           <div data-panel="repaso" hidden>${quizHtml(study)}</div>
+          ${(study.casos || []).length ? `<div data-panel="casos" hidden>${casesHtml(study)}</div>` : ""}
           <div data-panel="capturas" hidden>${shotsHtml(data)}</div>
           <div data-panel="links" hidden>${linksHtml(study)}</div>
           <div data-panel="texto" hidden>${transcriptHtml(data.lines || [])}</div>
@@ -1324,7 +1616,7 @@ function avisoShot(data, index, time) {
 function avisoAction() {
   return `<div class="aviso-action">
     <button class="primary" id="find-avisos" type="button">Buscar avisos</button>
-    <p class="note">Vuelve a leer lo que se dijo, sin transcribir otra vez. Completa la materia, la sesión y los enlaces de la explicación. Si ya guardaste el nombre o la materia, no los cambia.</p>
+    <p class="note">Vuelve a leer lo que se dijo, sin transcribir otra vez. Completa la materia, la sesión, los enlaces de la explicación y los casos, si el profesor presentó alguno. Si ya guardaste el nombre o la materia, no los cambia.</p>
   </div>`;
 }
 
@@ -1520,6 +1812,31 @@ function termsHtml(study) {
   return `<article class="block"><dl class="terms">${rows || "<p>No hay términos.</p>"}</dl></article>`;
 }
 
+function casesHtml(study) {
+  return (study.casos || []).map((item) => {
+    const when = clockStamp(item.tiempo);
+    const salto = when
+      ? `<button type="button" class="seek" data-time="${esc(when)}">Ver en el video ${esc(when)}</button>`
+      : "";
+    const questions = (item.preguntas || []).map((question) => {
+      const answer = question.respuesta || "En la clase no se cerró la respuesta.";
+      return `
+      <div class="case-q">
+        <h3>${esc(question.pregunta)}</h3>
+        <button class="ghost reveal" type="button">Ver respuesta</button>
+        <p class="answer" hidden>${esc(answer)}</p>
+      </div>`;
+    }).join("");
+    return `<article class="block">
+      <p class="kicker">Caso</p>
+      <h3>${esc(item.titulo || "Caso")}</h3>
+      ${rich(item.caso || "")}
+      ${salto}
+      ${questions || '<p class="note">El profesor presentó el caso y no hizo una pregunta.</p>'}
+    </article>`;
+  }).join("");
+}
+
 function quizHtml(study) {
   const cards = (study.repaso || []).map((item) => `
     <article class="block">
@@ -1592,6 +1909,15 @@ function speechFor(tab, data) {
   if (tab === "repaso") {
     return (study.repaso || []).map((item) => cleanSpeech(`Pregunta. ${item.pregunta}. Respuesta. ${item.respuesta}`)).filter(Boolean).join("\n");
   }
+  if (tab === "casos") {
+    return (study.casos || []).map((item) => {
+      const questions = (item.preguntas || []).map((question) => {
+        const answer = question.respuesta || "En la clase no se cerró la respuesta.";
+        return cleanSpeech(`Pregunta. ${question.pregunta}. Respuesta. ${answer}`);
+      }).filter(Boolean);
+      return [cleanSpeech(`Caso. ${item.titulo}. ${item.caso}`), ...questions].filter(Boolean).join(". ");
+    }).filter(Boolean).join("\n");
+  }
   if (tab === "capturas") {
     return (data.frames || []).map((frame, index) => {
       const note = frameNote(study, index);
@@ -1641,9 +1967,39 @@ function speechChunks(text) {
 }
 
 let speechToken = 0;
+let speechPace = 0;
 let speechPulse = 0;
 let speechToggleAt = 0;
 let phoneSpeech = null;
+const SPEECH_RATES = [1, 1.25, 1.5, 2];
+
+function speechRate() {
+  try {
+    const saved = Number(localStorage.getItem("cc-speech-rate"));
+    if (SPEECH_RATES.includes(saved)) return saved;
+  } catch { /* este aparato no guarda la velocidad */ }
+  return 1;
+}
+
+function speechRateLabel(rate) {
+  return `${String(rate).replace(".", ",")}×`;
+}
+
+function cycleSpeechRate() {
+  const current = speechRate();
+  const next = SPEECH_RATES[(SPEECH_RATES.indexOf(current) + 1) % SPEECH_RATES.length];
+  try { localStorage.setItem("cc-speech-rate", String(next)); } catch { /* este aparato no guarda la velocidad */ }
+  const button = document.querySelector("#listen-rate");
+  if (button) {
+    const label = speechRateLabel(next);
+    button.textContent = label;
+    button.setAttribute("aria-label", `Velocidad de la lectura: ${label}`);
+  }
+  if (document.querySelector("#listen")?.getAttribute("aria-pressed") !== "true") return;
+  speechPace += 1;
+  try { window.speechSynthesis?.cancel(); } catch { /* la voz cambia de velocidad */ }
+  try { phoneSpeech?.stop(); } catch { /* la voz del teléfono cambia de velocidad */ }
+}
 
 function primeVoices() {
   try { window.speechSynthesis?.getVoices?.(); } catch { /* este aparato no tiene voz del navegador */ }
@@ -1731,16 +2087,22 @@ function markListening() {
 async function startPhoneSpeech(reader, chunks) {
   const token = ++speechToken;
   markListening();
-  for (const chunk of chunks) {
+  let index = 0;
+  while (index < chunks.length) {
     if (token !== speechToken) return;
+    const pace = speechPace;
     try {
-      await reader.speak({ text: chunk });
+      await reader.speak({ text: chunks[index], rate: speechRate() });
     } catch {
       if (token !== speechToken) return;
+      if (pace !== speechPace) continue;
       listenNote("El teléfono no pudo leer en voz alta. En Ajustes, abre Texto a voz y descarga una voz en español.");
       stopSpeech();
       return;
     }
+    if (token !== speechToken) return;
+    if (pace !== speechPace) continue;
+    index += 1;
   }
   if (token === speechToken) stopSpeech();
 }
@@ -1755,27 +2117,41 @@ function startBrowserSpeech(synth, chunks) {
       stopSpeech();
       return;
     }
+    const pace = speechPace;
     const utterance = new SpeechSynthesisUtterance(chunks[index]);
-    index += 1;
     const voice = spanishVoice();
     utterance.lang = voice?.lang || "es-ES";
     if (voice) utterance.voice = voice;
-    utterance.rate = 1;
-    utterance.onend = speakNext;
-    utterance.onerror = (event) => {
-      if (event.error === "interrupted" || event.error === "canceled") return;
-      if (token !== speechToken) return;
-      listenNote("Este aparato no pudo leer en voz alta.");
-      stopSpeech();
+    utterance.rate = speechRate();
+    let settled = false;
+    const finish = (error) => {
+      if (settled || token !== speechToken) return;
+      settled = true;
+      if (pace !== speechPace) {
+        speakNext();
+        return;
+      }
+      if (error === "interrupted" || error === "canceled") return;
+      if (error) {
+        listenNote("Este aparato no pudo leer en voz alta.");
+        stopSpeech();
+        return;
+      }
+      index += 1;
+      speakNext();
     };
+    utterance.onend = () => finish("");
+    utterance.onerror = (event) => finish(event.error || "error");
     synth.speak(utterance);
   };
   try { synth.resume(); } catch { /* sigue con la voz */ }
   speakNext();
   speechPulse = setInterval(() => {
     if (token !== speechToken || !synth.speaking) return;
-    synth.pause();
-    synth.resume();
+    try {
+      synth.pause();
+      synth.resume();
+    } catch { /* el navegador sigue solo */ }
   }, 10000);
 }
 
@@ -1837,14 +2213,14 @@ function syncHideButton(slot) {
 }
 
 function toggleMiniVideo(slot) {
-  if (!slot.classList.contains("mini") || !phoneApp()) return;
+  if (!slot.classList.contains("mini")) return;
   const button = slot.querySelector(".player-hide");
   if (!button) return;
   if (slot.classList.contains("video-hidden")) {
     slot.classList.remove("video-hidden");
-    miniPlace = miniShownPlace;
+    if (phoneApp()) miniPlace = miniShownPlace;
     syncHideButton(slot);
-    if (miniPlace) applyMiniPlace(slot);
+    if (phoneApp() && miniPlace) applyMiniPlace(slot);
     else clearMiniOffset(slot);
     return;
   }
@@ -1858,7 +2234,7 @@ function toggleMiniVideo(slot) {
 }
 
 function applyMiniPlace(slot) {
-  if (!slot.classList.contains("mini") || !phoneApp()) {
+  if (!slot.classList.contains("mini")) {
     clearMiniOffset(slot);
     return;
   }
@@ -1869,7 +2245,7 @@ function applyMiniPlace(slot) {
       left: HIDE_PEEK - width,
       top: Math.round(Math.min(window.innerHeight - 48, Math.max(8, top))),
     };
-    miniPlace = place;
+    if (phoneApp()) miniPlace = place;
     slot.style.right = "auto";
     slot.style.bottom = "auto";
     slot.style.left = `${place.left}px`;
@@ -1877,7 +2253,7 @@ function applyMiniPlace(slot) {
     slot.classList.remove("peek-top");
     return;
   }
-  if (!miniPlace) {
+  if (!phoneApp() || !miniPlace) {
     clearMiniOffset(slot);
     return;
   }
@@ -1999,7 +2375,21 @@ function bindMiniPlayer() {
 function bindStudy() {
   document.querySelector("#back").onclick = goHome;
   const cursoClase = document.querySelector("#clase-curso");
-  if (cursoClase) cursoClase.onclick = () => abrirCursoModal("clase");
+  if (cursoClase) {
+    alTocarCurso(
+      cursoClase,
+      () => abrirCursoModal("clase"),
+      () => {
+        if (!clase || !clase.curso_id) {
+          abrirCursoModal("clase");
+          return;
+        }
+        editarNombreCurso(cursoClase, clase.curso_id, (nombre) => {
+          cursoClase.textContent = nombre || "Curso";
+        });
+      },
+    );
+  }
   bindMiniPlayer();
   const rename = document.querySelector("#rename");
   if (rename) rename.onsubmit = (event) => {
@@ -2015,9 +2405,12 @@ function bindStudy() {
   document.querySelector("#delete").onclick = () => removeClass(clase.id);
   const listen = document.querySelector("#listen");
   if (listen) listen.onclick = startSpeech;
+  const rate = document.querySelector("#listen-rate");
+  if (rate) rate.onclick = cycleSpeechRate;
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.onclick = () => {
       stopSpeech();
+      closeWikiPeek();
       document.querySelectorAll("[data-tab]").forEach((tabButton) => {
         tabButton.setAttribute("aria-selected", tabButton === button ? "true" : "false");
       });
@@ -2164,6 +2557,7 @@ function seekClass(seconds) {
 }
 
 async function openClass(id) {
+  closeWikiPeek();
   stopSpeech();
   clearYouTube();
   stopPoll();
@@ -2208,7 +2602,7 @@ async function ask(question) {
 
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".player-hide");
-  if (!button || !phoneApp()) return;
+  if (!button) return;
   const slot = button.closest(".player-slot.mini");
   if (!slot) return;
   event.preventDefault();
@@ -2219,6 +2613,18 @@ document.addEventListener("click", (event) => {
 document.querySelector(".brand").addEventListener("click", (event) => {
   event.preventDefault();
   goHome();
+});
+
+document.addEventListener("click", (event) => {
+  const link = event.target instanceof Element ? event.target.closest("a.wiki") : null;
+  if (!link) return;
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  openWikiPeek(link);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeWikiPeek();
 });
 
 function startClaseClara() {
