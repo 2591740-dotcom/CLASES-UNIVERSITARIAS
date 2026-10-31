@@ -1286,7 +1286,8 @@ function frameNote(study, index) {
 
 function frameButton(src, time, label, extra) {
   const when = time ? ` data-time="${esc(time)}"` : "";
-  return `<button type="button" class="frame-open" data-src="${esc(src)}"${when} data-label="${esc(label || "")}" aria-label="Ampliar captura">
+  const name = time ? `Ampliar captura, ${time}` : "Ampliar captura";
+  return `<button type="button" class="frame-open" data-src="${esc(src)}"${when} data-label="${esc(label || "")}" aria-label="${esc(name)}">
     <img src="${esc(src)}" alt="">
     ${extra || ""}
   </button>`;
@@ -1494,8 +1495,10 @@ function studyHtml(data) {
   const frames = data.frames || [];
   const film = frames.map((frame, index) => {
     const note = frameNote(study, index);
-    const label = note?.que_muestra || durationStamp(frame.time);
-    return frameButton(frameSrc(data, frame.file), durationStamp(frame.time), label, `<span>${esc(label)}</span>`);
+    const stamp = durationStamp(frame.time);
+    const label = note?.que_muestra || stamp;
+    const detail = label !== stamp ? `<span class="film-note">${esc(label)}</span>` : "";
+    return frameButton(frameSrc(data, frame.file), stamp, label, `<span class="film-time">${esc(stamp)}</span>${detail}`);
   }).join("");
   const player = playerHtml(data);
   const when = durationLabel(data.duration);
@@ -1512,6 +1515,7 @@ function studyHtml(data) {
             <button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>
             <h1 id="class-heading">${esc(shownTitle)}</h1>
             <p class="idea">${esc(study.idea || "")}</p>
+            <button class="texty" id="rename-open" type="button">Cambiar nombre</button>
             <form id="rename" class="rename">
               <div class="grow">
                 <label for="class-title">Nombre de la clase</label>
@@ -2392,6 +2396,14 @@ function bindStudy() {
   }
   bindMiniPlayer();
   const rename = document.querySelector("#rename");
+  const renameOpen = document.querySelector("#rename-open");
+  if (renameOpen && rename) {
+    renameOpen.onclick = () => {
+      rename.classList.add("open");
+      renameOpen.hidden = true;
+      document.querySelector("#class-title")?.focus();
+    };
+  }
   if (rename) rename.onsubmit = (event) => {
     event.preventDefault();
     saveTitle();
@@ -2417,6 +2429,7 @@ function bindStudy() {
       document.querySelectorAll("[data-panel]").forEach((panel) => {
         panel.hidden = panel.dataset.panel !== button.dataset.tab;
       });
+      button.scrollIntoView({ inline: "nearest", block: "nearest" });
     };
   });
   document.querySelectorAll(".reveal").forEach((button) => {
