@@ -212,7 +212,7 @@ main { width: min(1120px, calc(100% - 32px)); margin: 24px auto 48px; }
 
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
 
-input[type="text"], input[type="file"], textarea {
+input[type="text"], input[type="password"], input[type="email"], input[type="file"], textarea {
   width: 100%;
   border: 1px solid var(--line);
   background: #fff;
@@ -853,6 +853,15 @@ html[data-fondo="oscuro"] .bubble strong {
   border-radius: 12px;
   padding: 11px 12px;
 }
+
+.pass-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pass-line input { flex: 1; min-width: 0; width: auto; }
+.pass-line button { flex: none; margin: 0; }
 
 .capsule {
   display: inline-flex;

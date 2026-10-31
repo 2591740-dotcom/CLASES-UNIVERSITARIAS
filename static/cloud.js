@@ -1144,7 +1144,10 @@
         <label for="gate-email">Correo</label>
         <input id="gate-email" type="email" autocomplete="username" value="${escGate(saved ? saved.email : "")}">
         <label for="gate-pass">Contraseña</label>
-        <input id="gate-pass" type="password" autocomplete="${crear ? "new-password" : "current-password"}">
+        <div class="pass-line">
+          <input id="gate-pass" type="password" autocomplete="${crear ? "new-password" : "current-password"}" autocapitalize="off" spellcheck="false">
+          <button class="ghost" id="gate-show" type="button" aria-pressed="false" aria-controls="gate-pass">Ver</button>
+        </div>
         ${crear ? `
         <label for="gate-uni">Universidad</label>
         <select id="gate-uni">
@@ -1162,6 +1165,15 @@
         <p class="note" id="gate-error" ${message ? "" : "hidden"}>${escGate(message || "")}</p>
       </section>`;
     document.querySelector("#gate-switch").onclick = () => showLanding(crear ? "entrar" : "crear");
+    document.querySelector("#gate-show").onclick = () => {
+      const input = document.querySelector("#gate-pass");
+      const button = document.querySelector("#gate-show");
+      const visible = input.type === "password";
+      input.type = visible ? "text" : "password";
+      button.textContent = visible ? "Ocultar" : "Ver";
+      button.setAttribute("aria-pressed", visible ? "true" : "false");
+      input.focus();
+    };
     document.querySelector("#gate-go").onclick = async () => {
       const button = document.querySelector("#gate-go");
       const note = document.querySelector("#gate-error");
