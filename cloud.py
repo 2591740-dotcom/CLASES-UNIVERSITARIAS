@@ -111,28 +111,42 @@ def publish(class_id: str) -> None:
         study = {}
     if not isinstance(chat, list):
         chat = []
+    curso = _curso_id(meta.get("curso_id") or "")
+    remote_url = ""
+    remote_estudio: dict = {}
+    remote = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=video_url,estudio",
+    )
+    if isinstance(remote, list) and remote:
+        remote_url = str(remote[0].get("video_url") or "")
+        if isinstance(remote[0].get("estudio"), dict):
+            remote_estudio = remote[0]["estudio"]
+    remote_fecha = engine.fecha_iso(str(remote_estudio.get("fecha_clase") or ""))
+    if remote_estudio.get("fecha_custom") and remote_fecha and not meta.get("fecha_custom"):
+        meta["fecha"] = remote_fecha
+        meta["fecha_custom"] = True
+        meta["fecha_origen"] = "edit"
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    estudio = dict(study)
+    fecha = engine.fecha_iso(str(meta.get("fecha") or ""))
+    if fecha:
+        estudio["fecha_clase"] = fecha
+        estudio["fecha_custom"] = bool(meta.get("fecha_custom"))
     row = {
         "id": class_id,
         "titulo": (study.get("titulo") or meta.get("title") or "Clase")[:140],
         "materia": (meta.get("materia") or "")[:120],
         "video_url": "",
         "duracion": float(meta.get("duration") or 0),
-        "estudio": study,
+        "estudio": estudio,
         "transcripcion": transcript if isinstance(transcript, dict) else {},
         "chat": chat,
         "estado": "lista" if meta.get("status") == "ready" else (meta.get("status") or "error"),
         "detalle": (meta.get("detail") or "")[:300],
     }
-    curso = _curso_id(meta.get("curso_id") or "")
     if curso:
         row["curso_id"] = curso
-    remote_url = ""
-    remote = _request(
-        "GET",
-        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=video_url",
-    )
-    if isinstance(remote, list) and remote:
-        remote_url = str(remote[0].get("video_url") or "")
     row["video_url"] = choose_video_url(
         meta.get("video_url") or "",
         remote_url,
@@ -264,7 +278,7 @@ def pending() -> list[dict]:
         return []
     rows = _request(
         "GET",
-        "/rest/v1/clases?estado=eq.pendiente&select=id,video_url,materia,titulo",
+        "/rest/v1/clases?estado=eq.pendiente&select=id,video_url,materia,titulo,estudio",
     )
     if not isinstance(rows, list):
         return []
@@ -423,6 +437,29 @@ def delete_entrada(class_id: str) -> None:
         )
     except engine.AppError:
         return
+
+
+def save_fecha(class_id: str, fecha: str, custom: bool) -> None:
+    iso = engine.fecha_iso(fecha)
+    if not configured() or not _valid_id(class_id) or not iso:
+        return
+    remote = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=estudio",
+    )
+    estudio: dict = {}
+    if isinstance(remote, list) and remote and isinstance(remote[0].get("estudio"), dict):
+        estudio = dict(remote[0]["estudio"])
+    if estudio.get("fecha_custom") and not custom:
+        return
+    estudio["fecha_clase"] = iso
+    estudio["fecha_custom"] = bool(custom)
+    _request(
+        "PATCH",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}",
+        {"estudio": estudio},
+        prefer="return=minimal",
+    )
 
 
 def mark(class_id: str, estado: str, detalle: str) -> None:

@@ -319,6 +319,34 @@
     return "ready";
   }
 
+  function fechaIso(value) {
+    const text = String(value || "").trim();
+    const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const dayFirst = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    let year;
+    let month;
+    let day;
+    if (iso) {
+      year = Number(iso[1]);
+      month = Number(iso[2]);
+      day = Number(iso[3]);
+    } else if (dayFirst) {
+      day = Number(dayFirst[1]);
+      month = Number(dayFirst[2]);
+      year = Number(dayFirst[3]);
+    } else {
+      return "";
+    }
+    const found = new Date(year, month - 1, day);
+    if (found.getFullYear() !== year || found.getMonth() !== month - 1 || found.getDate() !== day) return "";
+    if (year < 2000) return "";
+    const latest = new Date();
+    latest.setDate(latest.getDate() + 1);
+    latest.setHours(23, 59, 59, 999);
+    if (found > latest) return "";
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
   function card(row) {
     const estado = row.estado || "lista";
     const started = Date.parse(row.creado || "");
@@ -335,6 +363,7 @@
       detail: row.detalle || "",
       error: estado === "error" ? (row.detalle || "Se detuvo.") : "",
       created: row.creado || "",
+      fecha: fechaIso(row.estudio && row.estudio.fecha_clase),
       started: Number.isFinite(started) ? Math.floor(started / 1000) : 0,
       duration: row.duracion || 0,
       avisos,
@@ -435,7 +464,7 @@
     return Boolean((study.explicacion || []).length || study.resumen);
   }
 
-  async function saveEntry({ link, file, materia, classId, onProgress }) {
+  async function saveEntry({ link, file, materia, classId, onProgress, fecha }) {
     if (link) assertZoom(link);
     if (file && file.size > 2500000000) throw new Error("Ese video pasa de 2.5 GB.");
     if (file && !file.size) throw new Error("Ese archivo está vacío.");
@@ -453,6 +482,7 @@
       if (!estudio) throw new Error("Entra de nuevo para preparar la clase.");
       const cursoId = readCursoId();
       if (!esIdCurso(cursoId)) throw new Error("Elige o crea un curso.");
+      const cuando = fechaIso(fecha);
       await rest("POST", "/rest/v1/clases", {
         id,
         titulo,
@@ -461,7 +491,7 @@
         carrera: estudio.carrera,
         curso_id: cursoId,
         video_url: link || "",
-        estudio: {},
+        estudio: cuando ? { fecha_clase: cuando } : {},
         transcripcion: {},
         chat: [],
         estado: "pendiente",
@@ -472,12 +502,22 @@
       if (classId && studyReady(await one(classId))) return id;
       try {
         const count = await uploadEntrada(id, file, onProgress);
-        await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, {
+        const patch = {
           video_url: `entrada:${count}`,
           materia: course,
           estado: "pendiente",
           detalle: "La computadora prepara el video y lo publica",
-        });
+        };
+        const cuando = fechaIso(fecha);
+        if (cuando) {
+          const row = await one(id);
+          const previo = { ...(row.estudio || {}) };
+          if (!previo.fecha_custom) {
+            previo.fecha_clase = cuando;
+            patch.estudio = previo;
+          }
+        }
+        await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, patch);
         if (!nativeStore) persistBrowser(id, file);
       } catch (error) {
         try {
@@ -827,6 +867,16 @@
         materia: String(body.materia || "").slice(0, 120),
       });
       return card(await one(title[1]));
+    }
+    const fechaClase = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/fecha$/);
+    if (fechaClase && method === "POST") {
+      const body = JSON.parse((options && options.body) || "{}");
+      const iso = fechaIso(body.fecha);
+      if (!iso) throw new Error("Escribe una fecha válida.");
+      const row = await one(fechaClase[1]);
+      const estudio = { ...(row.estudio || {}), fecha_clase: iso, fecha_custom: true };
+      await rest("PATCH", `/rest/v1/clases?id=eq.${fechaClase[1]}`, { estudio });
+      return card(await one(fechaClase[1]));
     }
     const item = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})$/);
     if (item && method === "GET") return detail(item[1]);

@@ -15,6 +15,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 MODEL = "grok-4.7"
@@ -252,6 +253,163 @@ def has_video(path: Path) -> bool:
         timeout=60,
     )
     return b"video" in (done.stdout or b"")
+
+
+def _fecha_valida(year: int, month: int, day: int) -> str:
+    try:
+        found = datetime(int(year), int(month), int(day))
+    except (TypeError, ValueError):
+        return ""
+    if found.year < 2000:
+        return ""
+    latest = (datetime.now() + timedelta(days=1)).date()
+    if found.date() > latest:
+        return ""
+    return found.date().isoformat()
+
+
+def fecha_iso(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    clock = fecha_desde_reloj(text)
+    if clock:
+        return clock
+    day_first = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", text)
+    if day_first:
+        return _fecha_valida(int(day_first.group(3)), int(day_first.group(2)), int(day_first.group(1)))
+    return ""
+
+
+def fecha_desde_reloj(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?)?", text)
+    if not match:
+        return ""
+    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if match.group(4) is None:
+        return _fecha_valida(year, month, day)
+    try:
+        when = datetime(year, month, day, int(match.group(4)), int(match.group(5)), int(match.group(6)))
+    except ValueError:
+        return ""
+    zone = match.group(7) or ""
+    if zone:
+        raw = f"{when.strftime('%Y-%m-%dT%H:%M:%S')}{zone.replace('Z', '+00:00')}"
+        try:
+            aware = datetime.fromisoformat(raw)
+        except ValueError:
+            return _fecha_valida(year, month, day)
+        when = aware.astimezone().replace(tzinfo=None)
+    return _fecha_valida(when.year, when.month, when.day)
+
+
+def date_in_text(text: str) -> str:
+    raw = str(text or "")
+    tagged = re.search(r"(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)", raw, re.I)
+    if tagged:
+        found = _fecha_valida(int(tagged.group(1)), int(tagged.group(2)), int(tagged.group(3)))
+        if found:
+            return found
+    separated = re.search(r"(20\d{2})[-_.]([01]\d)[-_.]([0-3]\d)", raw)
+    if separated:
+        found = _fecha_valida(int(separated.group(1)), int(separated.group(2)), int(separated.group(3)))
+        if found:
+            return found
+    compact = re.search(r"(?:^|[^\d])(20\d{2})([01]\d)([0-3]\d)(?:[^\d]|$)", raw)
+    if compact:
+        found = _fecha_valida(int(compact.group(1)), int(compact.group(2)), int(compact.group(3)))
+        if found:
+            return found
+    day_first = re.search(r"(?:^|[^\d])([0-3]\d)[./-]([01]\d)[./-](20\d{2})(?:[^\d]|$)", raw)
+    if not day_first:
+        return ""
+    day, month, year = int(day_first.group(1)), int(day_first.group(2)), int(day_first.group(3))
+    found = _fecha_valida(year, month, day)
+    if found:
+        return found
+    return _fecha_valida(year, day, month)
+
+
+def media_created(path: Path) -> str:
+    if not path.is_file() or shutil.which("ffprobe") is None:
+        return ""
+    try:
+        done = subprocess.run(
+            [
+                ffprobe_bin(), "-v", "error",
+                "-show_entries", "format_tags:stream_tags",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            startupinfo=_startupinfo(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    try:
+        payload = json.loads((done.stdout or b"").decode("utf-8", "replace") or "{}")
+    except json.JSONDecodeError:
+        return ""
+    bags: list[dict] = []
+    fmt = payload.get("format") if isinstance(payload, dict) else None
+    if isinstance(fmt, dict) and isinstance(fmt.get("tags"), dict):
+        bags.append(fmt["tags"])
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if isinstance(streams, list):
+        for stream in streams:
+            if isinstance(stream, dict) and isinstance(stream.get("tags"), dict):
+                bags.append(stream["tags"])
+    wanted = ("creation_time", "creationdate", "com.apple.quicktime.creationdate", "date")
+    for bag in bags:
+        folded = {str(key).lower(): value for key, value in bag.items()}
+        for key in wanted:
+            if key not in folded:
+                continue
+            found = fecha_desde_reloj(str(folded[key] or ""))
+            if found:
+                return found
+    return ""
+
+
+def file_day(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        stamp = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return ""
+    return _fecha_valida(stamp.year, stamp.month, stamp.day)
+
+
+def fecha_de_video(path: Path, filename: str = "", hint: str = "", usar_mtime: bool = True) -> tuple[str, str]:
+    """Fecha de la clase y de dónde salió: embedded, name, archivo o mtime."""
+    target = path
+    if path.is_dir():
+        videos = sorted(path.glob("video*.mp4"))
+        if videos:
+            target = videos[0]
+    if target.is_file():
+        embedded = media_created(target)
+        if embedded:
+            return embedded, "embedded"
+    names = [filename, target.name if str(target) else "", path.name]
+    parent = target.parent.name if str(target.parent) else ""
+    if parent:
+        names.append(parent)
+    for text in names:
+        found = date_in_text(text)
+        if found:
+            return found, "name"
+    hinted = fecha_iso(hint)
+    if hinted:
+        return hinted, "archivo"
+    if usar_mtime and target.is_file() and target.name.lower() != "fuente.mp4":
+        day = file_day(target)
+        if day:
+            return day, "mtime"
+    return "", ""
 
 
 def fmt_time(seconds: float) -> str:
@@ -2956,6 +3114,15 @@ def answer(study: dict, transcript: str, materia: str, history: list[dict], ques
 
 
 def self_test() -> None:
+    assert date_in_text("GMT20261030-150012_Recording.mp4") == "2026-10-30"
+    assert date_in_text("2026-10-30 15.04.22 Clase de psicología") == "2026-10-30"
+    assert date_in_text("Clase 30-10-2026.mp4") == "2026-10-30"
+    assert date_in_text("video123.mp4") == ""
+    assert fecha_iso("2026-10-31") == "2026-10-31"
+    assert fecha_iso("31/10/2026") == "2026-10-31"
+    assert fecha_iso("1999-01-01") == ""
+    assert fecha_iso("no es una fecha") == ""
+    assert fecha_desde_reloj("2026-10-30T20:04:22.000000Z")
     assert fmt_time(0) == "0:00"
     assert fmt_time(65) == "1:05"
     assert fmt_time(3661) == "1:01:01"

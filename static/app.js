@@ -8,6 +8,68 @@ let shown = "";
 let clase = null;
 let setup = null;
 
+function fechaIso(value) {
+  const text = String(value || "").trim();
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const dayFirst = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  let year;
+  let month;
+  let day;
+  if (iso) {
+    year = Number(iso[1]);
+    month = Number(iso[2]);
+    day = Number(iso[3]);
+  } else if (dayFirst) {
+    day = Number(dayFirst[1]);
+    month = Number(dayFirst[2]);
+    year = Number(dayFirst[3]);
+  } else {
+    return "";
+  }
+  const found = new Date(year, month - 1, day);
+  if (found.getFullYear() !== year || found.getMonth() !== month - 1 || found.getDate() !== day) return "";
+  if (year < 2000) return "";
+  const latest = new Date();
+  latest.setDate(latest.getDate() + 1);
+  latest.setHours(23, 59, 59, 999);
+  if (found > latest) return "";
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function fechaEnTexto(text) {
+  const raw = String(text || "");
+  const tagged = raw.match(/(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)/i);
+  if (tagged) {
+    const found = fechaIso(`${tagged[1]}-${tagged[2]}-${tagged[3]}`);
+    if (found) return found;
+  }
+  const separated = raw.match(/(20\d{2})[-_.]([01]\d)[-_.]([0-3]\d)/);
+  if (separated) {
+    const found = fechaIso(`${separated[1]}-${separated[2]}-${separated[3]}`);
+    if (found) return found;
+  }
+  const compact = raw.match(/(?:^|[^\d])(20\d{2})([01]\d)([0-3]\d)(?:[^\d]|$)/);
+  if (compact) {
+    const found = fechaIso(`${compact[1]}-${compact[2]}-${compact[3]}`);
+    if (found) return found;
+  }
+  const dayFirst = raw.match(/(?:^|[^\d])([0-3]\d)[./-]([01]\d)[./-](20\d{2})(?:[^\d]|$)/);
+  if (!dayFirst) return "";
+  const direct = fechaIso(`${dayFirst[3]}-${dayFirst[2]}-${dayFirst[1]}`);
+  if (direct) return direct;
+  return fechaIso(`${dayFirst[3]}-${dayFirst[1]}-${dayFirst[2]}`);
+}
+
+function fechaDelArchivo(file) {
+  if (!file) return "";
+  const named = fechaEnTexto(file.name || "");
+  if (named) return named;
+  const when = Number(file.lastModified);
+  if (!Number.isFinite(when) || when < Date.UTC(2000, 0, 1)) return "";
+  const day = new Date(when);
+  return fechaIso(`${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`);
+}
+
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -667,10 +729,16 @@ function homeHtml(classes, status, cursos) {
     </section>
     <section class="panel">
       <div class="drop" id="drop">
-        <label for="path">Enlace de Zoom o video</label>
-        <input id="path" type="text" placeholder="Pega un enlace zoom.us/rec/play/">
-        <div class="row">
+        <div class="fuente" id="fuente-link">
+          <label for="path">Enlace de Zoom</label>
+          <input id="path" type="text" placeholder="Pega un enlace zoom.us/rec/play/" autocomplete="off">
+        </div>
+        <div class="fuente" id="fuente-archivo">
+          <label>Video de esta computadora</label>
           <button class="ghost" id="pick" type="button">Elegir video</button>
+          <p class="picked" id="picked" hidden></p>
+        </div>
+        <div class="row">
           <button class="primary" id="go" type="button">Procesar</button>
         </div>
         <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. El nombre de la clase sale de lo que se dijo; si queda mal, se corrige al abrirla.</p>
@@ -719,10 +787,14 @@ function cardHtml(item) {
   const extra = item.status === "error" ? item.error : item.status === "ready" ? durationLabel(item.duration) : item.detail;
   const avisos = Number(item.avisos) || 0;
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
+  const fecha = fechaIso(item.fecha);
   return `
     <article class="card" data-id="${esc(item.id)}">
       <span class="status ${esc(item.status)}">${esc(state)}</span>
       ${flag}
+      <label class="card-date">Fecha
+        <input class="fecha-clase" type="date" data-id="${esc(item.id)}" value="${esc(fecha)}" aria-label="Fecha de la clase">
+      </label>
       <h3>${esc(item.title || "Clase")}</h3>
       ${extra ? `<p>${esc(extra)}</p>` : ""}
       <div class="actions">
@@ -1031,10 +1103,14 @@ function abrirPreparar() {
         <button class="ghost" id="prepare-close" type="button">Cerrar</button>
       </div>
       <div class="drop" id="drop">
-        <label for="link">Enlace de Zoom</label>
-        <input id="link" type="text" placeholder="https://....zoom.us/rec/play/..." autocomplete="off">
-        <label for="file">Video o audio de este aparato</label>
-        <input id="file" type="file" accept="${FILE_ACCEPT}">
+        <div class="fuente" id="fuente-link">
+          <label for="link">Enlace de Zoom</label>
+          <input id="link" type="text" placeholder="https://....zoom.us/rec/play/..." autocomplete="off">
+        </div>
+        <div class="fuente" id="fuente-archivo">
+          <label for="file">Video o audio de este aparato</label>
+          <input id="file" type="file" accept="${FILE_ACCEPT}">
+        </div>
         <div class="row">
           <button class="primary" id="go" type="button">Preparar clase</button>
         </div>
@@ -1049,6 +1125,7 @@ function abrirPreparar() {
   modal.querySelector("#go").onclick = saveFromPhone;
   const drop = modal.querySelector("#drop");
   const fileInput = modal.querySelector("#file");
+  enlazarFuente(drop);
   drop.addEventListener("dragover", (event) => {
     event.preventDefault();
     drop.classList.add("over");
@@ -1102,7 +1179,17 @@ async function showHome() {
   const openPrepare = document.querySelector("#open-prepare");
   if (openPrepare) openPrepare.onclick = abrirPreparar;
   const go = document.querySelector("#go");
-  if (go) go.onclick = () => startPath(document.querySelector("#path").value.trim());
+  if (go) go.onclick = () => {
+    const link = document.querySelector("#path")?.value.trim() || "";
+    startPath(link || chosenPath);
+  };
+  const homeDrop = document.querySelector("#drop");
+  if (homeDrop && homeDrop.querySelector("#path")) enlazarFuente(homeDrop);
+  document.querySelectorAll(".fecha-clase").forEach((input) => {
+    input.dataset.prev = input.value;
+    input.addEventListener("pointerdown", (event) => event.stopPropagation());
+    input.addEventListener("change", () => guardarFecha(input));
+  });
   document.querySelectorAll(".open-class").forEach((button) => {
     button.onclick = () => openClass(button.dataset.id);
   });
@@ -1245,7 +1332,18 @@ async function chooseFile() {
   button.textContent = "Mira la ventana ClaseClara en la barra…";
   try {
     const data = await api("/api/pick", { method: "POST" });
-    if (data.path) document.querySelector("#path").value = data.path;
+    if (data.path) {
+      chosenPath = data.path;
+      const path = document.querySelector("#path");
+      if (path) path.value = "";
+      const picked = document.querySelector("#picked");
+      if (picked) {
+        picked.hidden = false;
+        picked.textContent = data.path.split(/[\\/]/).pop();
+      }
+      const drop = document.querySelector("#drop");
+      if (drop) pintarFuente(drop);
+    }
   } catch (error) {
     alert(error.message);
   } finally {
@@ -1301,6 +1399,50 @@ function youtubeProgress(job) {
 }
 
 let droppedFile = null;
+let chosenPath = "";
+
+function pintarFuente(root) {
+  if (!root) return;
+  const link = root.querySelector("#path, #link");
+  const enlace = root.querySelector("#fuente-link");
+  const archivo = root.querySelector("#fuente-archivo");
+  if (!link || !enlace || !archivo) return;
+  const file = root.querySelector("#file");
+  const hayLink = link.value.trim().length > 0;
+  const hayArchivo = root.querySelector("#path")
+    ? Boolean(chosenPath)
+    : Boolean((file && file.files && file.files.length) || (file && droppedFile));
+  enlace.classList.toggle("dim", hayArchivo);
+  archivo.classList.toggle("dim", hayLink && !hayArchivo);
+}
+
+function enlazarFuente(root) {
+  if (!root) return;
+  const link = root.querySelector("#path, #link");
+  const file = root.querySelector("#file");
+  if (link) {
+    link.addEventListener("input", () => {
+      if (link.value.trim()) {
+        if (root.querySelector("#path")) chosenPath = "";
+        if (file) file.value = "";
+        if (root.querySelector("#link")) droppedFile = null;
+        const picked = root.querySelector("#picked");
+        if (picked) {
+          picked.hidden = true;
+          picked.textContent = "";
+        }
+      }
+      pintarFuente(root);
+    });
+  }
+  if (file) {
+    file.addEventListener("change", () => {
+      if (file.files && file.files.length && link) link.value = "";
+      pintarFuente(root);
+    });
+  }
+  pintarFuente(root);
+}
 
 function setInputFile(input, file) {
   droppedFile = file;
@@ -1310,6 +1452,10 @@ function setInputFile(input, file) {
     input.files = transfer.files;
     droppedFile = null;
   } catch { /* Preparar clase usa el archivo soltado */ }
+  const root = input.closest("#drop");
+  const link = root ? root.querySelector("#link") : null;
+  if (link && file) link.value = "";
+  if (root) pintarFuente(root);
 }
 
 function ensureProcessPlayer(job) {
@@ -1387,6 +1533,7 @@ async function saveFromPhone() {
     const id = await window.claseClaraCloud.saveEntry({
       link,
       file,
+      fecha: file && !link ? fechaDelArchivo(file) : "",
       onProgress: (text) => { button.textContent = text; },
     });
     cerrarPreparar(true);
@@ -1428,6 +1575,8 @@ function uploadFile(file) {
   renderProcess({ status: "processing", stage: "audio", detail: "Subiendo el video…", started: Math.floor(Date.now() / 1000) });
   const body = new FormData();
   body.append("file", file);
+  const fecha = fechaDelArchivo(file);
+  if (fecha) body.append("fecha", fecha);
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/upload");
   xhr.upload.onprogress = (event) => {
@@ -1467,6 +1616,32 @@ function watch(id) {
   };
   tick();
   poll = setInterval(tick, 1000);
+}
+
+async function guardarFecha(input) {
+  const id = input.dataset.id;
+  const value = input.value;
+  const anterior = input.dataset.prev || "";
+  if (!id) return;
+  if (!value) {
+    input.value = anterior;
+    return;
+  }
+  input.disabled = true;
+  try {
+    const saved = await api(`/api/classes/${id}/fecha`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fecha: value }),
+    });
+    input.value = fechaIso(saved.fecha) || value;
+    input.dataset.prev = input.value;
+  } catch (error) {
+    alert(error.message);
+    input.value = anterior;
+  } finally {
+    input.disabled = false;
+  }
 }
 
 async function saveTitle() {

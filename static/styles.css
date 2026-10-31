@@ -210,6 +210,40 @@ main { width: min(1120px, calc(100% - 32px)); margin: 24px auto 48px; }
 
 .drop.over { border-color: var(--brass); background: var(--brass-soft); }
 
+.fuente.dim label { color: #a3988c; }
+
+.fuente.dim input,
+.fuente.dim button {
+  background: #e4ded4;
+  color: #8d847a;
+  border-color: #d5cdc2;
+}
+
+.picked { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+
+.card-date {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.card-date,
+.card-date input { cursor: pointer; user-select: auto; -webkit-user-select: auto; }
+
+.card-date input[type="date"] {
+  width: auto;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+}
+
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
 
 input[type="text"], input[type="password"], input[type="email"], input[type="file"], textarea {
@@ -974,6 +1008,22 @@ html[data-fondo="oscuro"] .fondo .texty.on {
 html[data-fondo="oscuro"] .banner {
   background: #2a2118;
   border-color: #5c4632;
+}
+
+html[data-fondo="oscuro"] .fuente.dim label { color: #6e675f; }
+
+html[data-fondo="oscuro"] .fuente.dim input,
+html[data-fondo="oscuro"] .fuente.dim button {
+  background: #101010;
+  color: #6a645c;
+  border-color: #2a2a2a;
+}
+
+html[data-fondo="oscuro"] .card-date input[type="date"] {
+  background: #141414;
+  color: var(--ink);
+  border-color: var(--line);
+  color-scheme: dark;
 }
 
 html[data-fondo="oscuro"] .drop { border-color: #3a3a3a; }

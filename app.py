@@ -364,6 +364,7 @@ def public_meta(meta: dict) -> dict:
         "detail": meta.get("detail") or "",
         "error": meta.get("error") or "",
         "created": meta.get("created") or "",
+        "fecha": engine.fecha_iso(str(meta.get("fecha") or "")),
         "duration": meta.get("duration") or 0,
         "title_custom": bool(meta.get("title_custom")),
         "frames": meta.get("frames") or [],
@@ -386,6 +387,7 @@ def list_classes() -> list[dict]:
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        meta = completar_fecha(folder.name, meta)
         row = public_meta(meta)
         row["curso_id"] = str(meta.get("curso_id") or "")
         study = read_json(folder / "study.json", None)
@@ -468,8 +470,59 @@ def media_kind(path: Path) -> str | None:
     return None
 
 
+def completar_fecha(class_id: str, meta: dict) -> dict:
+    saved = engine.fecha_iso(str(meta.get("fecha") or ""))
+    if meta.get("fecha_custom") and saved:
+        if saved != meta.get("fecha"):
+            return update_meta(class_id, fecha=saved)
+        return meta
+    if saved and meta.get("fecha_origen") in {"embedded", "name", "archivo", "mtime", "edit"}:
+        return meta
+    source = Path(str(meta.get("source") or ""))
+    iso, origin = engine.fecha_de_video(source, usar_mtime=source.name.lower() != "fuente.mp4")
+    if not iso or (iso == saved and origin == meta.get("fecha_origen")):
+        return meta
+    updated = update_meta(class_id, fecha=iso, fecha_origen=origin, fecha_custom=False)
+    try:
+        cloud.save_fecha(class_id, iso, False)
+    except Exception:
+        traceback.print_exc()
+    return updated
+
+
+def set_fecha(class_id: str, raw: str) -> dict:
+    iso = engine.fecha_iso(raw)
+    if not iso:
+        raise engine.AppError("Escribe una fecha válida.")
+    updated = update_meta(class_id, fecha=iso, fecha_custom=True, fecha_origen="edit")
+    try:
+        cloud.save_fecha(class_id, iso, True)
+    except Exception:
+        traceback.print_exc()
+    return public_meta(updated)
+
+
+def completar_fechas() -> None:
+    if not CLASSES.is_dir():
+        return
+    for folder in CLASSES.iterdir():
+        meta_path = folder / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", folder.name):
+            continue
+        try:
+            completar_fecha(folder.name, meta)
+        except engine.AppError:
+            continue
+
+
 def class_detail(class_id: str) -> dict:
-    meta = read_meta(class_id)
+    meta = completar_fecha(class_id, read_meta(class_id))
     folder = class_dir(class_id)
     transcript = read_json(folder / "transcript.json", {})
     study = read_json(folder / "study.json", None)
@@ -748,6 +801,11 @@ def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = ""
             "started": int(datetime.now().timestamp()),
             "curso_id": cloud._curso_id(curso_id),
         }
+        iso, origin = engine.fecha_de_video(dest, usar_mtime=False)
+        if iso:
+            meta["fecha"] = iso
+            meta["fecha_origen"] = origin
+            meta["fecha_custom"] = False
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
         launch(class_id)
@@ -811,6 +869,18 @@ def adopt_pending() -> None:
             except engine.AppError:
                 pass
             continue
+        estudio = row.get("estudio") if isinstance(row.get("estudio"), dict) else {}
+        hinted = engine.fecha_iso(str(estudio.get("fecha_clase") or ""))
+        custom = bool(estudio.get("fecha_custom")) and bool(hinted)
+        if custom:
+            iso, origin = hinted, "edit"
+        else:
+            iso, origin = engine.fecha_de_video(
+                dest,
+                filename=str(row.get("titulo") or ""),
+                hint=hinted,
+                usar_mtime=False,
+            )
         meta = {
             "id": class_id,
             "title": str(row.get("titulo") or "Clase por enlace")[:140],
@@ -819,6 +889,9 @@ def adopt_pending() -> None:
             "materia": str(row.get("materia") or "")[:120],
             "terms": "",
             "created": datetime.now().isoformat(timespec="seconds"),
+            "fecha": iso,
+            "fecha_origen": origin,
+            "fecha_custom": custom,
             "status": "processing",
             "stage": "audio",
             "detail": "Preparando el video",
@@ -829,6 +902,11 @@ def adopt_pending() -> None:
             "started": int(datetime.now().timestamp()),
         }
         write_meta(class_id, meta)
+        if iso and not custom:
+            try:
+                cloud.save_fecha(class_id, iso, False)
+            except Exception:
+                traceback.print_exc()
         ACTIVE.add(class_id)
         print(f"[ClaseClara] empieza {class_id} desde el teléfono", flush=True)
         launch(class_id)
@@ -874,6 +952,10 @@ def watch_cloud() -> None:
     except Exception:
         traceback.print_exc()
     try:
+        completar_fechas()
+    except Exception:
+        traceback.print_exc()
+    try:
         count = cloud.publish_ready()
         if count:
             print(f"[ClaseClara] {count} clases publicadas en Supabase", flush=True)
@@ -912,6 +994,11 @@ def create_class(source: Path, materia: str, terms: str, reuse: bool = False, cu
         "started": int(datetime.now().timestamp()),
         "curso_id": cloud._curso_id(curso_id),
     }
+    iso, origin = engine.fecha_de_video(media, filename=media.name, usar_mtime=True)
+    if iso:
+        meta["fecha"] = iso
+        meta["fecha_origen"] = origin
+        meta["fecha_custom"] = False
     write_meta(class_id, meta)
     print(f"[ClaseClara] empieza {class_id} {media.name}", flush=True)
     launch(class_id)
@@ -1270,6 +1357,11 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("materia") if body.get("materia") is not None else ""),
                 ))
                 return
+            dated = re.fullmatch(r"/api/classes/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})/fecha", path)
+            if dated:
+                body = self._read_json()
+                self._json(200, set_fecha(dated.group(1), str(body.get("fecha") or "")))
+                return
             if path == "/api/upload":
                 self._upload()
                 return
@@ -1330,6 +1422,16 @@ class Handler(BaseHTTPRequestHandler):
                 "reuse_transcript": False,
                 "started": int(datetime.now().timestamp()),
             }
+            iso, origin = engine.fecha_de_video(
+                saved,
+                filename=str(fields.get("_filename") or saved.name),
+                hint=str(fields.get("fecha") or ""),
+                usar_mtime=False,
+            )
+            if iso:
+                meta["fecha"] = iso
+                meta["fecha_origen"] = origin
+                meta["fecha_custom"] = False
             write_meta(class_id, meta)
             launch(class_id)
             start_youtube(class_id)
