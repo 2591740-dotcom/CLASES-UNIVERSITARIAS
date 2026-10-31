@@ -471,6 +471,38 @@
     if (file && !acceptedMedia(file)) {
       throw new Error("Ese archivo no es el video. Elige el .mp4, .mkv o el audio .m4a.");
     }
+    let claves = [];
+    if (typeof clavesDeEntrada === "function") {
+      try {
+        claves = await clavesDeEntrada({ link, file });
+      } catch {
+        claves = [];
+      }
+    }
+    claves = (Array.isArray(claves) ? claves : [])
+      .filter((key) => !String(key).startsWith("ruta:"))
+      .slice(0, 8);
+    if (claves.length && typeof avisoDuplicado === "function" && typeof clavesDeFila === "function") {
+      let rows = null;
+      try {
+        rows = await rest("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio&limit=1000");
+      } catch {
+        rows = null;
+      }
+      if (Array.isArray(rows)) {
+        const wanted = new Set(claves);
+        for (const row of rows) {
+          const rowId = String((row && row.id) || "");
+          if (!rowId || rowId === classId) continue;
+          const hit = clavesDeFila(row).filter((key) => wanted.has(key));
+          if (!hit.length) continue;
+          const tipo = hit.some((key) => key.startsWith("zoom:") || key.startsWith("yt:")) ? "enlace" : "video";
+          const error = new Error(avisoDuplicado(row.titulo, tipo));
+          error.duplicado = rowId;
+          throw error;
+        }
+      }
+    }
     const id = classId || newId();
     const course = (materia || "").slice(0, 120);
     const nativeStore = Boolean(file && window.Capacitor?.Plugins?.Filesystem && file.stream);
@@ -483,6 +515,9 @@
       const cursoId = readCursoId();
       if (!esIdCurso(cursoId)) throw new Error("Elige o crea un curso.");
       const cuando = fechaIso(fecha);
+      const estudioCuerpo = {};
+      if (cuando) estudioCuerpo.fecha_clase = cuando;
+      if (claves.length) estudioCuerpo.fuentes = claves;
       await rest("POST", "/rest/v1/clases", {
         id,
         titulo,
@@ -491,7 +526,7 @@
         carrera: estudio.carrera,
         curso_id: cursoId,
         video_url: link || "",
-        estudio: cuando ? { fecha_clase: cuando } : {},
+        estudio: estudioCuerpo,
         transcripcion: {},
         chat: [],
         estado: "pendiente",
@@ -509,13 +544,14 @@
           detalle: "La computadora prepara el video y lo publica",
         };
         const cuando = fechaIso(fecha);
-        if (cuando) {
-          const row = await one(id);
-          const previo = { ...(row.estudio || {}) };
-          if (!previo.fecha_custom) {
-            previo.fecha_clase = cuando;
+        if (cuando || claves.length) {
+          try {
+            const row = await one(id);
+            const previo = { ...(row.estudio || {}) };
+            if (claves.length) previo.fuentes = claves;
+            if (cuando && !previo.fecha_custom) previo.fecha_clase = cuando;
             patch.estudio = previo;
-          }
+          } catch { /* el video ya se envió; la fecha puede guardarse después */ }
         }
         await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, patch);
         if (!nativeStore) persistBrowser(id, file);
@@ -540,6 +576,14 @@
       if (!keep) {
         patch.estado = "pendiente";
         patch.detalle = "La computadora prepara el video y lo publica";
+      }
+      if (claves.length && classId) {
+        try {
+          const row = await one(id);
+          const previo = { ...(row.estudio || {}) };
+          previo.fuentes = claves;
+          patch.estudio = previo;
+        } catch { /* sigue sin pisar el estudio */ }
       }
       if (classId || course) await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, patch);
       return id;
@@ -783,6 +827,71 @@
     return { chat };
   }
 
+  function parseRespuesta(raw) {
+    let text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        const data = JSON.parse(text.slice(start, end + 1));
+        const texto = String(data && data.texto || "").trim();
+        if (texto) {
+          return { puede: data.puede === true || data.puede === "true", texto: texto.slice(0, 20000) };
+        }
+      } catch { /* el texto largo de abajo todavía puede servir */ }
+    }
+    if (text.length > 200) return { puede: true, texto: text.slice(0, 20000) };
+    throw new Error("No pude leer la respuesta. Inténtalo otra vez.");
+  }
+
+  async function askRespuesta(id, indice) {
+    const ia = await loadIa();
+    if (!ia || !ia.chat_key) throw new Error("Pega la clave en Configurar.");
+    const spec = phoneProviders.find((item) => item.id === ia.chat_provider);
+    if (spec && spec.explains === false) {
+      throw new Error(spec.label + " solo transcribe. Elige en Configurar quién explica.");
+    }
+    const url = chatEndpoint(ia);
+    if (!url) throw new Error("Ese proveedor responde desde la computadora.");
+    const row = await one(id);
+    const study = row.estudio || {};
+    const avisos = Array.isArray(study.avisos) ? study.avisos : [];
+    const aviso = avisos[indice];
+    if (!aviso || aviso.tipo !== "tarea") throw new Error("Esto no es una tarea.");
+    const transcript = row.transcripcion || {};
+    const spoken = transcript.text || (Array.isArray(transcript.lines)
+      ? transcript.lines.map((line) => `[${line.stamp || ""}] ${line.speaker || ""}: ${line.text || ""}`).join("\n")
+      : "");
+    const system = "Preparas la entrega de una tarea usando solo esta clase. Devuelves un JSON con puede y texto. puede es true solo cuando la transcripción y el material alcanzan para redactar la entrega sin inventar datos, lecturas que no se leyeron, entrevistas, encuestas ni experiencias personales que la clase no contó. Si falta algo esencial, puede es false y texto dice en una frase qué falta. Si puede es true, texto es la respuesta que el alumno puede entregar: párrafos en español, con lo explicado en clase, sin repetir el título y sin decir que eres una IA. No cites autores, cifras, fechas ni ejemplos que no estén en la clase. No escribas nada fuera del JSON.";
+    const encargo = `Tarea a responder ahora:\nTítulo: ${aviso.titulo || "Tarea"}\nPresentar: ${aviso.fecha || "no se dijo"}\nQué encargó: ${aviso.detalle || "no hay más detalle"}\nTexto o lectura leída en clase: ${aviso.texto || "no se leyó un texto en la clase"}`;
+    const messages = [
+      { role: "system", content: system },
+      {
+        role: "user",
+        content: `Materia: ${row.materia || "no indicada"}\n\nMaterial:\n${JSON.stringify(study)}\n\nTranscripción:\n${clipText(spoken)}\n\n${encargo}`,
+      },
+    ];
+    const anthropic = ia.chat_provider === "claude";
+    const model = ia.chat_model || (spec && spec.default_model) || "gpt-4.1";
+    const data = anthropic
+      ? await postJson(url, {
+        "x-api-key": ia.chat_key,
+        "anthropic-version": "2023-06-01",
+      }, {
+        model,
+        max_tokens: 4000,
+        system: messages[0].content,
+        messages: messages.slice(1),
+      })
+      : await postJson(url, {
+        Authorization: `Bearer ${ia.chat_key}`,
+        "Content-Type": "application/json",
+      }, { model, max_tokens: 4000, messages });
+    const answer = answerText(data);
+    if (!answer) throw new Error("La IA no devolvió una respuesta.");
+    return parseRespuesta(answer);
+  }
+
   function statusBody(ia) {
     const data = ia || {};
     const provider = data.chat_provider || "openai";
@@ -916,6 +1025,13 @@
       const message = String(body.message || "").trim();
       if (!message) throw new Error("Escribe una pregunta.");
       return askRemote(chat[1], message);
+    }
+    const respuesta = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/respuesta$/);
+    if (respuesta && method === "POST") {
+      const body = JSON.parse((options && options.body) || "{}");
+      const indice = Number(body.indice);
+      if (!Number.isInteger(indice) || indice < 0) throw new Error("Esa tarea no está en la clase.");
+      return askRespuesta(respuesta[1], indice);
     }
     throw new Error("Esa acción no está en esta página.");
   }

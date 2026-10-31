@@ -776,18 +776,141 @@ def queue_youtube() -> None:
         start_youtube(folder.name)
 
 
+class DuplicateClass(engine.AppError):
+    def __init__(self, message: str, class_id: str, tipo: str = "video") -> None:
+        super().__init__(message)
+        self.class_id = class_id
+        self.tipo = tipo
+
+
+def filas_locales() -> list[dict]:
+    rows = []
+    if not CLASSES.is_dir():
+        return rows
+    for folder in CLASSES.iterdir():
+        meta_path = folder / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        status = str(meta.get("status") or "")
+        if status == "ready":
+            estado = "lista"
+        elif status == "processing":
+            estado = "procesando"
+        else:
+            estado = status or "lista"
+        rows.append({
+            "id": str(meta.get("id") or folder.name),
+            "titulo": meta.get("title") or "Clase",
+            "video_url": meta.get("video_url") or meta.get("youtube_url") or "",
+            "estudio": {"fuentes": cloud.fuentes_de_meta(meta)},
+            "estado": estado,
+            "creado": str(meta.get("created") or ""),
+        })
+    return rows
+
+
+def duplicado_de(claves, excepto: str = "") -> dict | None:
+    rows = filas_locales()
+    try:
+        rows.extend(cloud.filas_fuentes())
+    except engine.AppError:
+        pass
+    return cloud.fila_duplicada(rows, claves, excepto)
+
+
+def exigir_unico(claves, excepto: str = "") -> None:
+    found = duplicado_de(claves, excepto)
+    if not found:
+        return
+    raise DuplicateClass(
+        cloud.aviso_duplicado(found.get("titulo") or "Clase", found.get("tipo") or "video"),
+        str(found.get("id") or ""),
+        str(found.get("tipo") or "video"),
+    )
+
+
+def claves_consulta(body: dict) -> list[str]:
+    claves: list[str] = []
+    url = str(body.get("url") or "").strip()
+    if url:
+        claves.extend(cloud.fuentes_de_url(url))
+    raw_path = str(body.get("path") or "").strip().strip('"')
+    if raw_path:
+        path = Path(raw_path)
+        if path.is_file():
+            claves.extend(cloud.fuentes_de_meta({
+                "source": str(path),
+                "title": path.stem,
+                "video_url": "",
+                "fuentes": [],
+            }))
+    name = str(body.get("name") or "")
+    try:
+        size = int(body.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if name:
+        claves.append(cloud.fuente_archivo(name, size))
+    huella = str(body.get("huella") or "").strip()
+    if huella.startswith("huella:") and cloud.clave_valida(huella):
+        claves.append(huella)
+    return cloud.limpiar_fuentes(claves)
+
+
+def detener_pendiente(class_id: str, row: dict, found: dict) -> bool:
+    estado = str(found.get("estado") or "")
+    if estado and estado != "pendiente":
+        return True
+    propio = str(row.get("creado") or "")
+    otro = str(found.get("creado") or "")
+    if propio and otro and propio != otro:
+        return propio > otro
+    return class_id > str(found.get("id") or "")
+
+
+def recordar_fuentes() -> None:
+    if not CLASSES.is_dir():
+        return
+    for folder in CLASSES.iterdir():
+        if not (folder / "meta.json").is_file():
+            continue
+        try:
+            meta = read_meta(folder.name)
+        except (OSError, json.JSONDecodeError, engine.AppError):
+            continue
+        claves = cloud.fuentes_de_meta(meta)
+        if claves and claves != meta.get("fuentes"):
+            try:
+                update_meta(folder.name, fuentes=claves)
+            except engine.AppError:
+                continue
+        publicas = cloud.limpiar_fuentes(claves, publicas=True)
+        if not publicas:
+            continue
+        try:
+            cloud.guardar_fuentes(folder.name, publicas)
+        except Exception:
+            traceback.print_exc()
+
+
 def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = "") -> str:
+    cleaned = cloud.assert_zoom_url(url)
+    exigir_unico(cloud.fuentes_de_url(cleaned))
     class_id = new_id()
     folder = class_dir(class_id)
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / "work" / "fuente.mp4"
     try:
-        cloud.download(url, dest)
+        cloud.download(cleaned, dest)
         meta = {
             "id": class_id,
             "title": "Clase por enlace",
             "source": str(dest.resolve()),
-            "video_url": cloud.assert_zoom_url(url),
+            "video_url": cleaned,
             "materia": materia.strip()[:120],
             "terms": terms.strip()[:400],
             "created": datetime.now().isoformat(timespec="seconds"),
@@ -806,6 +929,7 @@ def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = ""
             meta["fecha"] = iso
             meta["fecha_origen"] = origin
             meta["fecha_custom"] = False
+        meta["fuentes"] = cloud.fuentes_de_meta(meta)
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
         launch(class_id)
@@ -852,6 +976,17 @@ def adopt_pending() -> None:
                 continue
         url = str(row.get("video_url") or "").strip()
         if not cloud.ready_source(url):
+            continue
+        repetido = duplicado_de(cloud.claves_de_fila(row), excepto=class_id)
+        if repetido and detener_pendiente(class_id, row, repetido):
+            try:
+                cloud.mark(
+                    class_id,
+                    "error",
+                    cloud.aviso_duplicado(repetido.get("titulo") or "Clase", repetido.get("tipo") or "video"),
+                )
+            except engine.AppError:
+                pass
             continue
         folder.mkdir(parents=True, exist_ok=True)
         dest = folder / "work" / "fuente.mp4"
@@ -901,6 +1036,10 @@ def adopt_pending() -> None:
             "reuse_transcript": False,
             "started": int(datetime.now().timestamp()),
         }
+        meta["fuentes"] = cloud.fuentes_de_meta({
+            **meta,
+            "fuentes": cloud.claves_de_fila(row),
+        })
         write_meta(class_id, meta)
         if iso and not custom:
             try:
@@ -956,6 +1095,10 @@ def watch_cloud() -> None:
     except Exception:
         traceback.print_exc()
     try:
+        recordar_fuentes()
+    except Exception:
+        traceback.print_exc()
+    try:
         count = cloud.publish_ready()
         if count:
             print(f"[ClaseClara] {count} clases publicadas en Supabase", flush=True)
@@ -974,6 +1117,16 @@ def watch_cloud() -> None:
 
 def create_class(source: Path, materia: str, terms: str, reuse: bool = False, curso_id: str = "") -> str:
     media, _audio = engine.resolve_source(source)
+    try:
+        size = media.stat().st_size
+    except OSError as exc:
+        raise engine.AppError("No encuentro ese video.") from exc
+    claves = cloud.limpiar_fuentes([
+        cloud.fuente_archivo(media.name, size),
+        cloud.fuente_ruta(media),
+        cloud.fuente_huella(media),
+    ])
+    exigir_unico(claves)
     class_id = new_id()
     folder = class_dir(class_id)
     folder.mkdir(parents=True, exist_ok=True)
@@ -999,6 +1152,7 @@ def create_class(source: Path, materia: str, terms: str, reuse: bool = False, cu
         meta["fecha"] = iso
         meta["fecha_origen"] = origin
         meta["fecha_custom"] = False
+    meta["fuentes"] = claves
     write_meta(class_id, meta)
     print(f"[ClaseClara] empieza {class_id} {media.name}", flush=True)
     launch(class_id)
@@ -1316,6 +1470,18 @@ class Handler(BaseHTTPRequestHandler):
                     str(body.get("client_secret") or ""),
                 ))
                 return
+            if path == "/api/classes/duplicado":
+                body = self._read_json()
+                found = duplicado_de(claves_consulta(body))
+                if not found:
+                    self._json(200, {"duplicado": ""})
+                    return
+                self._json(200, {
+                    "duplicado": found.get("id") or "",
+                    "error": cloud.aviso_duplicado(found.get("titulo") or "Clase", found.get("tipo") or "video"),
+                    "tipo": found.get("tipo") or "video",
+                })
+                return
             if path == "/api/classes":
                 body = self._read_json()
                 raw_url = str(body.get("url") or "").strip()
@@ -1375,7 +1541,13 @@ class Handler(BaseHTTPRequestHandler):
             if chat:
                 self._chat(chat.group(1))
                 return
+            respuesta = re.fullmatch(r"/api/classes/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})/respuesta", path)
+            if respuesta:
+                self._respuesta(respuesta.group(1))
+                return
             self._error(404, "No encuentro esa acción.")
+        except DuplicateClass as exc:
+            self._json(400, {"error": str(exc), "duplicado": exc.class_id, "tipo": exc.tipo})
         except engine.AppError as exc:
             self._error(400, str(exc))
         except Exception:
@@ -1406,6 +1578,12 @@ class Handler(BaseHTTPRequestHandler):
             fields, saved = parse_multipart(LimitedReader(self.rfile, length), match.group(1) or match.group(2), folder)
             if saved is None:
                 raise engine.AppError("Falta el video.")
+            nombre = str(fields.get("_filename") or "")
+            claves = cloud.limpiar_fuentes([
+                cloud.fuente_archivo(nombre, saved.stat().st_size),
+                cloud.fuente_huella(saved),
+            ])
+            exigir_unico(claves)
             meta = {
                 "id": class_id,
                 "title": Path(fields.get("_filename") or saved.name).stem,
@@ -1432,6 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
                 meta["fecha"] = iso
                 meta["fecha_origen"] = origin
                 meta["fecha_custom"] = False
+            meta["fuentes"] = claves
             write_meta(class_id, meta)
             launch(class_id)
             start_youtube(class_id)
@@ -1477,6 +1656,39 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 traceback.print_exc()
         self._json(200, {"reply": reply, "chat": history})
+
+    def _respuesta(self, class_id: str) -> None:
+        body = self._read_json()
+        try:
+            indice = int(body.get("indice"))
+        except (TypeError, ValueError):
+            raise engine.AppError("Esa tarea no está en la clase.")
+        if indice < 0:
+            raise engine.AppError("Esa tarea no está en la clase.")
+        meta = read_meta(class_id)
+        if meta.get("status") != "ready":
+            raise engine.AppError("La clase todavía no está lista.")
+        folder = class_dir(class_id)
+        study = read_json(folder / "study.json", None)
+        if not isinstance(study, dict):
+            raise engine.AppError("Falta el material de la clase.")
+        avisos = study.get("avisos") or []
+        if indice >= len(avisos) or not isinstance(avisos[indice], dict):
+            raise engine.AppError("Esa tarea no está en la clase.")
+        aviso = avisos[indice]
+        if aviso.get("tipo") != "tarea":
+            raise engine.AppError("Esto no es una tarea.")
+        transcript = read_json(folder / "transcript.json", {})
+        lines = transcript.get("lines") or []
+        text = engine.lines_to_text(lines) if lines else (transcript.get("text") or "")
+        result = engine.respuesta_de_tarea(
+            study,
+            text,
+            meta.get("materia") or "",
+            aviso,
+            engine.config_for_chat(sync_settings()),
+        )
+        self._json(200, result)
 
 
 def make_server(port: int) -> ThreadingHTTPServer:

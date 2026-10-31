@@ -338,6 +338,17 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 }
 [data-panel] { scroll-margin-top: 120px; }
 .aviso-fecha { color: var(--brass); font-weight: 650; }
+.tarea-respuesta { margin-top: 12px; }
+.respuesta-vista {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+}
+.respuesta-vista .kicker { margin-bottom: 6px; }
+.respuesta-texto p { margin: 0 0 8px; }
+.respuesta-vista .row { margin-top: 4px; }
 .aviso .lectura {
   background: #fff;
   border: 1px solid var(--line);
@@ -979,6 +990,7 @@ html[data-fondo="oscuro"] .texty,
 html[data-fondo="oscuro"] .model-list article,
 html[data-fondo="oscuro"] .drop,
 html[data-fondo="oscuro"] .aviso .lectura,
+html[data-fondo="oscuro"] .respuesta-vista,
 html[data-fondo="oscuro"] .steps li,
 html[data-fondo="oscuro"] .film button,
 html[data-fondo="oscuro"] .shot,

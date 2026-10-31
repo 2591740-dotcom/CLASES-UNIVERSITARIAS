@@ -93,6 +93,108 @@ function youtubeId(raw) {
   return found ? found[1] : "";
 }
 
+const GENERICOS_ARCHIVO = new Set(["fuente", "video", "audio", "clase", "clase por enlace"]);
+
+function claveFuenteValida(key) {
+  const text = String(key || "").trim();
+  if (text.startsWith("zoom:") && text.length >= 14 && text.length <= 300) return true;
+  if (/^yt:[A-Za-z0-9_-]{11}$/.test(text)) return true;
+  if (text.startsWith("archivo:") && text.length >= 12 && text.length <= 120 && text.split(":").length - 1 >= 2) return true;
+  if (/^huella:[0-9a-f]{32}$/.test(text)) return true;
+  if (text.startsWith("ruta:") && text.length >= 8 && text.length <= 400) return true;
+  return false;
+}
+
+function limpiarFuentes(keys) {
+  const clean = [];
+  for (const item of keys || []) {
+    const key = String(item || "").trim();
+    if (!claveFuenteValida(key) || clean.includes(key)) continue;
+    clean.push(key);
+    if (clean.length >= 8) break;
+  }
+  return clean;
+}
+
+function fuenteZoom(url) {
+  const text = String(url || "").trim().replace(/\s+/g, " ");
+  if (!text || text.length > 2000) return "";
+  let parsed;
+  try { parsed = new URL(text); } catch { return ""; }
+  const host = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== "https:" || !host.endsWith("zoom.us")) return "";
+  const path = parsed.pathname;
+  for (const marker of ["/rec/play/", "/rec/share/", "/rec/download/"]) {
+    const at = path.indexOf(marker);
+    if (at < 0) continue;
+    const token = path.slice(at + marker.length).replace(/^\/+|\/+$/g, "").split("/")[0];
+    if (token.length >= 8 && token.length <= 240) return `zoom:${host}/${token}`;
+  }
+  return "";
+}
+
+function fuenteYouTube(url) {
+  const id = youtubeId(url);
+  return id ? `yt:${id}` : "";
+}
+
+function fuenteArchivo(name, size) {
+  const bytes = Number(size);
+  if (!Number.isFinite(bytes) || bytes < 1024 || bytes > 2500000000) return "";
+  const base = String(name || "").split(/[/\\]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  let stem = dot > 0 ? base.slice(0, dot) : base;
+  stem = stem.replace(/[_-]+/g, " ").replace(/\s+\(\d+\)$/, "");
+  stem = stem.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+  if (!stem || GENERICOS_ARCHIVO.has(stem)) return "";
+  return `archivo:${bytes}:${stem.slice(0, 80)}`;
+}
+
+async function fuenteHuella(file) {
+  if (!file || file.size < 1024 || file.size > 2500000000 || !crypto?.subtle) return "";
+  const chunk = 1024 * 1024;
+  const head = new Uint8Array(await file.slice(0, chunk).arrayBuffer());
+  let tail = new Uint8Array();
+  if (file.size > chunk) tail = new Uint8Array(await file.slice(file.size - chunk).arrayBuffer());
+  const sizeBytes = new TextEncoder().encode(String(file.size));
+  const all = new Uint8Array(head.length + tail.length + sizeBytes.length);
+  all.set(head, 0);
+  all.set(tail, head.length);
+  all.set(sizeBytes, head.length + tail.length);
+  const digest = await crypto.subtle.digest("SHA-256", all);
+  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `huella:${hex.slice(0, 32)}`;
+}
+
+function avisoDuplicado(titulo, tipo) {
+  const nombre = String(titulo || "Clase").split(/\s+/).filter(Boolean).join(" ").slice(0, 80) || "Clase";
+  const cosa = tipo === "enlace" ? "este enlace" : "este video";
+  return `Ya cargaste ${cosa} en «${nombre}». Lo detengo para no prepararlo otra vez.`;
+}
+
+function clavesDeFila(row) {
+  const keys = [fuenteZoom(row && row.video_url), fuenteYouTube(row && row.video_url)];
+  const fuentes = row && row.estudio && row.estudio.fuentes;
+  if (Array.isArray(fuentes)) keys.push(...fuentes);
+  return limpiarFuentes(keys);
+}
+
+async function clavesDeEntrada({ link, file } = {}) {
+  const keys = [];
+  if (link) keys.push(fuenteZoom(link), fuenteYouTube(link));
+  if (file) {
+    keys.push(fuenteArchivo(file.name, file.size));
+    try { keys.push(await fuenteHuella(file)); } catch { /* sin huella igual compara el nombre */ }
+  }
+  return limpiarFuentes(keys);
+}
+
+async function avisarDuplicado(found) {
+  alert((found && found.error) || "Ya cargaste esto. Lo detengo para no prepararlo otra vez.");
+  if (!found || !found.duplicado) return;
+  try { await openClass(found.duplicado); } catch { /* el aviso ya detuvo la carga */ }
+}
+
 function linkify(escaped) {
   return escaped.replace(
     /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s<>]+|(?:embed|shorts|live)\/[A-Za-z0-9_-]{11}[^\s<>]*)|youtu\.be\/[A-Za-z0-9_-]{11}[^\s<>]*)/gi,
@@ -153,7 +255,11 @@ async function api(url, options) {
   if (window.claseClaraCloud) return window.claseClaraCloud.api(url, options);
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "No se pudo completar.");
+  if (!response.ok) {
+    const error = new Error(data.error || "No se pudo completar.");
+    if (data.duplicado) error.duplicado = data.duplicado;
+    throw error;
+  }
   return data;
 }
 
@@ -1571,6 +1677,11 @@ async function saveFromPhone() {
     await openClass(id);
   } catch (error) {
     alert(error.message);
+    if (error && error.duplicado) {
+      cerrarPreparar(true);
+      try { await openClass(error.duplicado); } catch { /* el aviso ya detuvo la carga */ }
+      return;
+    }
     button.disabled = false;
     button.textContent = "Preparar clase";
   }
@@ -1586,8 +1697,24 @@ async function startPath(path) {
     abrirCursoModal("inicio");
     return;
   }
-  shown = "";
   const isLink = /^https?:\/\//i.test(path);
+  try {
+    const found = await api("/api/classes/duplicado", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(isLink ? { url: path } : { path }),
+    });
+    if (found && found.duplicado) {
+      await avisarDuplicado(found);
+      return;
+    }
+  } catch (error) {
+    if (error && error.duplicado) {
+      await avisarDuplicado({ duplicado: error.duplicado, error: error.message });
+      return;
+    }
+  }
+  shown = "";
   renderProcess({ status: "processing", stage: "audio", detail: isLink ? "Bajando el video del enlace" : "Preparando el video", started: Math.floor(Date.now() / 1000) });
   try {
     const data = await api("/api/classes", {
@@ -1597,11 +1724,32 @@ async function startPath(path) {
     });
     watch(data.id);
   } catch (error) {
+    if (error && error.duplicado) {
+      await avisarDuplicado({ duplicado: error.duplicado, error: error.message });
+      return;
+    }
     renderProcess({ status: "error", stage: "error", error: error.message });
   }
 }
 
-function uploadFile(file) {
+async function uploadFile(file) {
+  try {
+    const huella = await fuenteHuella(file);
+    const found = await api("/api/classes/duplicado", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, size: file.size, huella }),
+    });
+    if (found && found.duplicado) {
+      await avisarDuplicado(found);
+      return;
+    }
+  } catch (error) {
+    if (error && error.duplicado) {
+      await avisarDuplicado({ duplicado: error.duplicado, error: error.message });
+      return;
+    }
+  }
   shown = "";
   renderProcess({ status: "processing", stage: "audio", detail: "Subiendo el video…", started: Math.floor(Date.now() / 1000) });
   const body = new FormData();
@@ -1619,6 +1767,10 @@ function uploadFile(file) {
     let data = {};
     try { data = JSON.parse(xhr.responseText || "{}"); } catch { data = {}; }
     if (xhr.status >= 400) {
+      if (data.duplicado) {
+        avisarDuplicado({ duplicado: data.duplicado, error: data.error });
+        return;
+      }
       renderProcess({ status: "error", stage: "error", error: data.error || "No se pudo subir el video." });
       return;
     }
@@ -2054,7 +2206,7 @@ function noticesHtml(data) {
   if (!items.length) {
     return `${action}<p class="empty">En esta clase no apareció una tarea, lectura, exposición, reunión ni otro encargo.</p>`;
   }
-  return action + items.map((item) => {
+  return action + items.map((item, index) => {
     const kind = AVISO_LABEL[item.tipo] || "Aviso";
     const fecha = item.fecha
       ? `<p class="aviso-fecha">Presentar: ${esc(item.fecha)}</p>`
@@ -2070,6 +2222,12 @@ function noticesHtml(data) {
     const salto = item.tiempo
       ? `<button type="button" class="seek" data-time="${esc(item.tiempo)}">Ver en el video ${esc(item.tiempo)}</button>`
       : "";
+    const respuesta = item.tipo === "tarea" ? `
+      <div class="tarea-respuesta" data-aviso="${index}">
+        <button class="ghost ver-respuesta" type="button">Ver la respuesta</button>
+        <div class="respuesta-vista" hidden></div>
+        <p class="note respuesta-nota" hidden></p>
+      </div>` : "";
     return `<article class="block aviso">
       <p class="kicker">${esc(kind)}</p>
       <h3>${esc(item.titulo)}</h3>
@@ -2080,8 +2238,296 @@ function noticesHtml(data) {
       ${link}
       ${donde}
       ${salto}
+      ${respuesta}
     </article>`;
   }).join("");
+}
+
+function xmlTexto(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function nombreArchivo(titulo, ext) {
+  const base = String(titulo || "Tarea").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Tarea";
+  return `${base}.${ext}`;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const value of bytes) {
+    crc ^= value;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+  const u16 = (n) => [n & 255, (n >> 8) & 255];
+  const u32 = (n) => [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255];
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  files.forEach((file) => {
+    const name = new TextEncoder().encode(file.name);
+    const data = typeof file.data === "string" ? new TextEncoder().encode(file.data) : file.data;
+    const crc = crc32(data);
+    const local = new Uint8Array([
+      ...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0),
+    ]);
+    parts.push(local, name, data);
+    central.push(new Uint8Array([
+      ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0),
+      ...u16(0), ...u16(0), ...u32(0), ...u32(offset),
+    ]), name);
+    offset += local.length + name.length + data.length;
+  });
+  let centralSize = 0;
+  central.forEach((part) => { centralSize += part.length; });
+  const end = new Uint8Array([
+    ...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length),
+    ...u32(centralSize), ...u32(offset), ...u16(0),
+  ]);
+  return new Blob([...parts, ...central, end], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+}
+
+function parrafoWord(text, bold, size) {
+  const marca = bold ? "<w:b/>" : "";
+  return `<w:p><w:r><w:rPr>${marca}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr><w:t xml:space="preserve">${xmlTexto(text)}</w:t></w:r></w:p>`;
+}
+
+function wordDeTarea(doc) {
+  const paras = [parrafoWord(doc.clase, true, 32), parrafoWord(doc.tarea, true, 28)];
+  if (doc.fecha) paras.push(parrafoWord(doc.fecha, false, 22));
+  paras.push(parrafoWord("", false, 22));
+  String(doc.texto || "").split("\n").forEach((line) => paras.push(parrafoWord(line, false, 22)));
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paras.join("")}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>`;
+  return zipStore([
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+    },
+    { name: "word/document.xml", data: documentXml },
+  ]);
+}
+
+function pdfLiteral(text) {
+  let out = "";
+  for (const ch of String(text || "")) {
+    const code = ch.codePointAt(0);
+    const byte = code <= 255 ? code : 63;
+    if (byte === 92 || byte === 40 || byte === 41) out += `\\${String.fromCharCode(byte)}`;
+    else if (byte < 32 || byte > 126) out += `\\${byte.toString(8).padStart(3, "0")}`;
+    else out += String.fromCharCode(byte);
+  }
+  return `(${out})`;
+}
+
+function partirLinea(text, max) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let current = "";
+  words.forEach((word) => {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > max && current) {
+      lines.push(current);
+      current = word;
+    } else current = next;
+  });
+  if (current) lines.push(current);
+  return lines;
+}
+
+function lineasPdf(doc) {
+  const lines = [];
+  partirLinea(doc.clase, 62).forEach((text) => lines.push({ text, size: 16, gap: 22 }));
+  lines.push({ text: "", size: 12, gap: 8 });
+  partirLinea(doc.tarea, 78).forEach((text) => lines.push({ text, size: 13, gap: 18 }));
+  if (doc.fecha) lines.push({ text: doc.fecha, size: 11, gap: 18 });
+  lines.push({ text: "", size: 11, gap: 10 });
+  String(doc.texto || "").split("\n").forEach((paragraph) => {
+    if (!paragraph.trim()) {
+      lines.push({ text: "", size: 11, gap: 10 });
+      return;
+    }
+    partirLinea(paragraph.trim(), 90).forEach((text) => lines.push({ text, size: 11, gap: 15 }));
+    lines.push({ text: "", size: 11, gap: 8 });
+  });
+  return lines;
+}
+
+function pdfBlob(lines) {
+  const pages = [];
+  let current = [];
+  let y = 790;
+  lines.forEach((line) => {
+    if (y - line.gap < 56) {
+      pages.push(current);
+      current = [];
+      y = 790;
+    }
+    y -= line.gap;
+    current.push({ text: line.text, size: line.size, y });
+  });
+  if (current.length || !pages.length) pages.push(current);
+  const objs = ["", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"];
+  const kids = [];
+  pages.forEach((page) => {
+    const commands = ["BT"];
+    page.forEach((line) => {
+      if (!line.text) return;
+      commands.push(`/F1 ${line.size} Tf`);
+      commands.push(`1 0 0 1 56 ${line.y} Tm`);
+      commands.push(`${pdfLiteral(line.text)} Tj`);
+    });
+    commands.push("ET");
+    const stream = commands.join("\n");
+    objs.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+    const contentId = objs.length;
+    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${contentId} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`);
+    kids.push(`${objs.length} 0 R`);
+  });
+  objs[0] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objs[1] = `<< /Type /Pages /Count ${kids.length} /Kids [${kids.join(" ")}] >>`;
+  let body = "%PDF-1.4\n";
+  const offsets = [0];
+  objs.forEach((obj, index) => {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xref = body.length;
+  body += `xref\n0 ${objs.length + 1}\n`;
+  body += "0000000000 65535 f \n";
+  for (let index = 1; index < offsets.length; index += 1) {
+    body += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  }
+  body += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new Blob([body], { type: "application/pdf" });
+}
+
+function pdfDeTarea(doc) {
+  return pdfBlob(lineasPdf(doc));
+}
+
+function blobABase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+    reader.onerror = () => reject(new Error("No pude preparar el archivo."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function entregarArchivo(blob, name, nota) {
+  if (!phoneApp()) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return;
+  }
+  const file = new File([blob], name, { type: blob.type || "application/octet-stream" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name });
+      return;
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+    }
+  }
+  const fs = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem;
+  if (!fs) throw new Error("No pude guardar el archivo en este teléfono.");
+  await fs.writeFile({ path: name, data: await blobABase64(blob), directory: "DOCUMENTS" });
+  if (nota) {
+    nota.hidden = false;
+    nota.textContent = "Se guardó en Documentos de la aplicación.";
+  }
+}
+
+function documentoTarea(indice, texto) {
+  const study = (clase && clase.study) || {};
+  const aviso = (study.avisos || [])[indice] || {};
+  return {
+    clase: study.titulo || (clase && clase.title) || "Clase",
+    tarea: aviso.titulo || "Tarea",
+    fecha: aviso.fecha ? `Presentar: ${aviso.fecha}` : "",
+    texto,
+  };
+}
+
+async function exportarTarea(indice, texto, formato) {
+  const doc = documentoTarea(indice, texto);
+  const blob = formato === "pdf" ? pdfDeTarea(doc) : wordDeTarea(doc);
+  const box = document.querySelector(`.tarea-respuesta[data-aviso="${indice}"]`);
+  const nota = box ? box.querySelector(".respuesta-nota") : null;
+  try {
+    await entregarArchivo(blob, nombreArchivo(doc.tarea, formato === "pdf" ? "pdf" : "docx"), nota);
+  } catch (error) {
+    if (!nota) return;
+    nota.hidden = false;
+    nota.textContent = error.message || "No pude exportar.";
+  }
+}
+
+function pintarRespuesta(box, texto, indice) {
+  const vista = box.querySelector(".respuesta-vista");
+  vista.hidden = false;
+  vista.innerHTML = `
+    <p class="kicker">Vista previa</p>
+    <div class="respuesta-texto">${rich(texto)}</div>
+    <div class="row">
+      <button class="ghost export-word" type="button">Word</button>
+      <button class="ghost export-pdf" type="button">PDF</button>
+    </div>`;
+  vista.querySelector(".export-word").onclick = () => exportarTarea(indice, texto, "word");
+  vista.querySelector(".export-pdf").onclick = () => exportarTarea(indice, texto, "pdf");
+}
+
+async function verRespuesta(button) {
+  const box = button.closest(".tarea-respuesta");
+  const indice = Number(box.dataset.aviso);
+  const nota = box.querySelector(".respuesta-nota");
+  button.disabled = true;
+  button.textContent = "Preparando la respuesta…";
+  nota.hidden = true;
+  try {
+    const data = await api(`/api/classes/${clase.id}/respuesta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ indice }),
+    });
+    if (!data.puede) {
+      nota.hidden = false;
+      nota.textContent = data.texto || "Con lo dicho en clase no alcanza para armar esta respuesta.";
+      button.hidden = true;
+      return;
+    }
+    pintarRespuesta(box, data.texto || "", indice);
+    button.hidden = true;
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Ver la respuesta";
+    nota.hidden = false;
+    nota.textContent = error.message || "No pude preparar la respuesta.";
+  }
 }
 
 function durationStamp(seconds) {
@@ -2956,6 +3402,9 @@ function bindStudy() {
   };
   const findAvisos = document.querySelector("#find-avisos");
   if (findAvisos) findAvisos.onclick = () => retryJob(clase.id, false);
+  document.querySelectorAll(".ver-respuesta").forEach((button) => {
+    button.onclick = () => verRespuesta(button);
+  });
   const openAvisos = document.querySelector("#open-avisos");
   if (openAvisos) openAvisos.onclick = () => abrirAvisos();
   document.querySelector("#delete").onclick = () => removeClass(clase.id);

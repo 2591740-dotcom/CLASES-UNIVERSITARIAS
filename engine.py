@@ -3090,6 +3090,75 @@ CHAT_SYSTEM = (
 )
 
 
+RESPUESTA_SYSTEM = (
+    "Preparas la entrega de una tarea usando solo esta clase. "
+    "Devuelves un JSON con puede y texto. "
+    "puede es true solo cuando la transcripción y el material alcanzan para redactar la entrega "
+    "sin inventar datos, lecturas que no se leyeron, entrevistas, encuestas ni experiencias personales que la clase no contó. "
+    "Si falta algo esencial, puede es false y texto dice en una frase qué falta. "
+    "Si puede es true, texto es la respuesta que el alumno puede entregar: párrafos en español, "
+    "con lo explicado en clase, sin repetir el título y sin decir que eres una IA. "
+    "No cites autores, cifras, fechas ni ejemplos que no estén en la clase. "
+    "No escribas nada fuera del JSON."
+)
+
+
+def respuesta_schema() -> dict:
+    return _object_schema(
+        {
+            "puede": {"type": "boolean"},
+            "texto": {"type": "string"},
+        },
+        ["puede", "texto"],
+    )
+
+
+def parse_respuesta(raw: str) -> dict:
+    text = _as_text(raw)
+    fenced = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    start = fenced.find("{")
+    end = fenced.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(fenced[start:end + 1])
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            texto = _as_text(data.get("texto"))
+            if not texto:
+                raise AppError("La respuesta llegó vacía.")
+            puede = data.get("puede") is True or data.get("puede") == "true"
+            return {"puede": puede, "texto": texto[:20000].rstrip()}
+    if len(fenced) > 200:
+        return {"puede": True, "texto": fenced[:20000].rstrip()}
+    raise AppError("No pude leer la respuesta. Inténtalo otra vez.")
+
+
+def respuesta_de_tarea(study: dict, transcript: str, materia: str, aviso: dict, cfg: AiConfig) -> dict:
+    encargo = (
+        "Tarea a responder ahora:\n"
+        f"Título: {_as_text(aviso.get('titulo')) or 'Tarea'}\n"
+        f"Presentar: {_as_text(aviso.get('fecha')) or 'no se dijo'}\n"
+        f"Qué encargó: {_as_text(aviso.get('detalle')) or 'no hay más detalle'}\n"
+        f"Texto o lectura leída en clase: {_as_text(aviso.get('texto')) or 'no se leyó un texto en la clase'}"
+    )
+    context = (
+        f"Materia: {materia or 'no indicada'}\n\n"
+        f"Material:\n{json.dumps(study, ensure_ascii=False)}\n\n"
+        f"Transcripción:\n{clip_text(transcript, 70_000)}\n\n"
+        f"{encargo}"
+    )
+    messages = [
+        {"role": "system", "content": RESPUESTA_SYSTEM},
+        {"role": "user", "content": context},
+    ]
+    raw = complete(messages, cfg, None, timeout=180)
+    parsed = parse_respuesta(raw)
+    parsed["texto"] = repair_accents(parsed["texto"], transcript)
+    return parsed
+
+
 def answer(study: dict, transcript: str, materia: str, history: list[dict], question: str, cfg: AiConfig) -> str:
     context = (
         f"Materia: {materia or 'no indicada'}\n\n"
@@ -3539,6 +3608,18 @@ def self_test() -> None:
     assert dg_cfg.stt_kind == "deepgram"
     assert dg_cfg.stt_model == "nova-3"
     assert dg_cfg.stt_url == "https://api.deepgram.com/v1/listen"
+    hecha = parse_respuesta('{"puede": true, "texto": "La praxia se explicó en clase."}')
+    assert hecha["puede"] is True
+    assert "praxia" in hecha["texto"]
+    negada = parse_respuesta('```json\n{"puede": false, "texto": "Falta la lectura."}\n```')
+    assert negada["puede"] is False
+    assert negada["texto"] == "Falta la lectura."
+    assert parse_respuesta("x" * 220)["puede"] is True
+    try:
+        parse_respuesta("no")
+        raise AssertionError("una respuesta corta no vale")
+    except AppError as exc:
+        assert "leer la respuesta" in str(exc)
     assert "keyterm" in urllib.parse.urlencode(_deepgram_params("nova-3", ["Penfield"], True))
     assert _deepgram_params("nova-2", [], False)[-1] == ("language", "es")
 
