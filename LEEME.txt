@@ -44,12 +44,13 @@ En el sitio, Environment variables:
   SUPABASE_ANON_KEY = la clave anon (Project Settings, API)
   SUPABASE_EMAIL = claseclara.app.user@gmail.com
 
-La contraseña de la app no va en Git. En la web cada persona
-crea una cuenta. El correo aparece en Supabase, Table Editor,
+La contraseña de la app no va en Git. En la web y en el APK cada
+persona crea una cuenta. El correo aparece en Supabase, Table Editor,
 tabla cuentas, con activo en falso. Para dar permiso, pon
 activo en true. La contraseña no se guarda en esa tabla: queda
-en el navegador de ese aparato. Si borras la fila de ese correo,
-la misma persona puede crear la cuenta otra vez.
+en ese aparato. Si borras la fila de ese correo, la misma persona
+puede crear la cuenta otra vez. Sirve igual en el navegador y en
+el teléfono.
 
 La página hace lo mismo que el APK. En la computadora, en Android
 o en el iPhone pegas un enlace de Zoom (zoom.us/rec/play/) o cargas
@@ -58,8 +59,9 @@ usas el chat. La explicación, las diapositivas y el video para los
 demás aparatos los prepara esta PC cuando iniciar.bat está abierto.
 El archivo no se queda guardado en Supabase.
 
-El APK sigue en ClaseClara.apk, en esta misma carpeta.
-No lo compartas: abre tus clases.
+El APK está en ClaseClara.apk, en esta misma carpeta.
+Instálalo encima del anterior. Pide el correo y espera el
+permiso de la tabla cuentas, igual que la página.
 
 Escuchar lee en voz alta la pestaña que estás viendo:
 explicación, resumen, esquema, glosario, repaso, avisos,

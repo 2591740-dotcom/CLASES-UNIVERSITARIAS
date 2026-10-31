@@ -86,7 +86,7 @@
         return;
       } catch { /* entra de nuevo */ }
     }
-    if (!cfg.password) throw new Error("La sesión venció. Recarga la página para entrar de nuevo.");
+    if (native || !cfg.password) throw new Error("La sesión venció. Recarga la página para entrar de nuevo.");
     await auth({ grant_type: "password", email: cfg.email, password: cfg.password });
   }
 
@@ -888,10 +888,27 @@
   }
 
   async function pedirCuenta(accion, email, clave) {
+    const payload = { accion, email, clave };
+    if (native) {
+      const http = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+      if (!http) throw new Error("No pude hablar con la cuenta.");
+      const result = await http.request({
+        url: "https://clases-universitarias.netlify.app/.netlify/functions/cuenta",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        data: payload,
+      });
+      let data = result ? result.data : {};
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { data = {}; }
+      }
+      if (!data || !data.estado) throw new Error("No pude hablar con la cuenta.");
+      return data;
+    }
     const response = await fetch("/.netlify/functions/cuenta", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accion, email, clave }),
+      body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
     if (!data.estado) throw new Error("No pude hablar con la cuenta.");
@@ -1013,7 +1030,7 @@
     }
   }
 
-  if (onWeb && !cfg.password) {
+  if (native || (onWeb && !cfg.password)) {
     window.CLASECLARA_HOLD = true;
     queueMicrotask(() => { checkSaved(); });
   }
