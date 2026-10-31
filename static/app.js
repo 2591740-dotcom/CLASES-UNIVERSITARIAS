@@ -3088,8 +3088,8 @@ window.speechSynthesis?.addEventListener?.("voiceschanged", primeVoices);
 
 function phoneReader() {
   const cap = window.Capacitor;
-  if (!cap || typeof cap.isNativePlatform !== "function" || !cap.isNativePlatform()) return null;
-  if (typeof cap.registerPlugin !== "function") return null;
+  const native = Boolean(window.androidBridge || (cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform()));
+  if (!native || !cap || typeof cap.registerPlugin !== "function") return null;
   if (!phoneSpeech) phoneSpeech = cap.registerPlugin("ClaseClaraSpeech");
   return phoneSpeech;
 }
@@ -3296,7 +3296,7 @@ function speakWithLimit(reader, texts) {
       try { reader.stop(); } catch { /* la voz no contestó */ }
       reject(new Error("tiempo"));
     }, budget);
-    reader.speak({ texts: list, rate: speechRate() }).then(
+    reader.speak({ text, texts: list, rate: speechRate() }).then(
       () => {
         if (done) return;
         done = true;
@@ -3325,7 +3325,7 @@ async function startPhoneSpeech(reader, chunks) {
   };
   let handle = null;
   try {
-    handle = await reader.addListener("piece", onPiece);
+    reader.addListener("piece", onPiece).then((next) => { handle = next; }).catch(() => {});
   } catch { /* la voz sigue sin avisar el tramo */ }
   try {
     while (index < chunks.length) {

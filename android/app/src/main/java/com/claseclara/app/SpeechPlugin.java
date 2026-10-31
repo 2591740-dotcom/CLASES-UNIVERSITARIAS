@@ -1,10 +1,6 @@
 package com.claseclara.app;
 
-import android.Manifest;
-import android.app.Activity;
 import android.content.Context;
-import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -12,11 +8,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
-
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -48,6 +42,7 @@ public class SpeechPlugin extends Plugin {
     private final List<String> pendingParts = new ArrayList<>();
     private PluginCall active;
     private Context appContext;
+    private PowerManager.WakeLock wakeLock;
     private static SpeechPlugin live;
 
     static void stopFromNotification() {
@@ -179,8 +174,6 @@ public class SpeechPlugin extends Plugin {
             finish(false, "sin voz");
             return;
         }
-        beginReading();
-        askNotification();
         if (!ready) return;
         speakNow();
     }
@@ -203,11 +196,26 @@ public class SpeechPlugin extends Plugin {
 
     private void speakNow() {
         if (tts == null || active == null) return;
+        beginReading();
         try {
             speakPieces(pendingParts);
         } catch (RuntimeException ex) {
             retryOrFail();
+            return;
         }
+        armWatch();
+    }
+
+    private void armWatch() {
+        int mine = generation;
+        main.postDelayed(() -> {
+            if (active == null || generation != mine || heard) return;
+            if (retries < 1) {
+                retryOrFail();
+                return;
+            }
+            finish(false, "sin voz");
+        }, 5000);
     }
 
     private void speakPieces(List<String> texts) {
@@ -269,6 +277,8 @@ public class SpeechPlugin extends Plugin {
 
     private void onPieceFailed(String utteranceId) {
         if (active == null || !matches(utteranceId)) return;
+        boolean last = utteranceId != null && utteranceId.endsWith(":last");
+        if (!last && heard) return;
         if (!heard && retries < 1) {
             retryOrFail();
             return;
@@ -345,8 +355,9 @@ public class SpeechPlugin extends Plugin {
     }
 
     private void beginReading() {
-        if (appContext == null) return;
         reading = true;
+        holdWake();
+        if (appContext == null) return;
         try {
             ReadingService.start(appContext);
         } catch (RuntimeException ignored) {
@@ -355,11 +366,9 @@ public class SpeechPlugin extends Plugin {
     }
 
     private void endReading() {
-        if (!reading || appContext == null) {
-            reading = false;
-            return;
-        }
         reading = false;
+        releaseWake();
+        if (appContext == null) return;
         try {
             ReadingService.dismiss(appContext);
         } catch (RuntimeException ignored) {
@@ -367,16 +376,27 @@ public class SpeechPlugin extends Plugin {
         }
     }
 
-    private void askNotification() {
-        if (Build.VERSION.SDK_INT < 33 || appContext == null) return;
-        if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS)
-                == PackageManager.PERMISSION_GRANTED) return;
-        Activity activity = getActivity();
-        if (activity == null) return;
-        SharedPreferences prefs = appContext.getSharedPreferences("claseclara", Context.MODE_PRIVATE);
-        if (prefs.getBoolean("notif-lectura", false)) return;
-        prefs.edit().putBoolean("notif-lectura", true).apply();
-        ActivityCompat.requestPermissions(activity, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4101);
+    private void holdWake() {
+        if (appContext == null || (wakeLock != null && wakeLock.isHeld())) return;
+        try {
+            PowerManager manager = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+            if (manager == null) return;
+            wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ClaseClara:lectura");
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire(6L * 60L * 60L * 1000L);
+        } catch (RuntimeException ignored) {
+            // The voice still plays if the lock is unavailable.
+        }
+    }
+
+    private void releaseWake() {
+        if (wakeLock == null) return;
+        try {
+            if (wakeLock.isHeld()) wakeLock.release();
+        } catch (RuntimeException ignored) {
+            // The lock was already released.
+        }
+        wakeLock = null;
     }
 
     private void applyRate() {
@@ -420,7 +440,7 @@ public class SpeechPlugin extends Plugin {
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build();
-            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
                     .setAudioAttributes(attrs)
                     .build();
             result = audioManager.requestAudioFocus(focusRequest);
@@ -432,7 +452,7 @@ public class SpeechPlugin extends Plugin {
 
     @SuppressWarnings("deprecation")
     private int requestFocusLegacy() {
-        return audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        return audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
     }
 
     private void abandonFocus() {

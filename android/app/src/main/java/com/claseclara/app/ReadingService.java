@@ -51,9 +51,14 @@ public class ReadingService extends Service {
             shutdown();
             return START_NOT_STICKY;
         }
-        holdWake();
-        openSession();
-        showOngoing();
+        try {
+            holdWake();
+            openSession();
+            showOngoing();
+        } catch (RuntimeException ignored) {
+            // La voz sigue aunque el aviso del sistema no pueda mostrarse.
+            holdWake();
+        }
         return START_STICKY;
     }
 
@@ -68,11 +73,15 @@ public class ReadingService extends Service {
     private void showOngoing() {
         ensureChannel();
         Notification notification = buildNotification();
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else {
-            startForeground(NOTIF_ID, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                return;
+            }
+        } catch (RuntimeException ignored) {
+            // Sigue con el aviso simple si el tipo de servicio no entra.
         }
+        startForeground(NOTIF_ID, notification);
     }
 
     private void shutdown() {
@@ -136,15 +145,7 @@ public class ReadingService extends Service {
         }
         session = new MediaSession(this, "ClaseClaraLectura");
         session.setCallback(new MediaSession.Callback() {
-            @Override
-            public void onPause() {
-                SpeechPlugin.stopFromNotification();
-            }
-
-            @Override
-            public void onStop() {
-                SpeechPlugin.stopFromNotification();
-            }
+            // La pausa del sistema, al apagar la pantalla, no corta la lectura.
         }, new Handler(Looper.getMainLooper()));
         session.setActive(true);
         markPlaying();
