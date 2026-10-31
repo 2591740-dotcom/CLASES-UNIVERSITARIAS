@@ -1,0 +1,12 @@
+data/
+__pycache__/
+*.pyc
+node_modules/
+.netlify/
+static/cloud-config.js
+ClaseClara.apk
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/

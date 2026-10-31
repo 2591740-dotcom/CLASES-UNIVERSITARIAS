@@ -1,0 +1,67 @@
+ClaseClara
+==========
+
+Estudia una clase grabada de Zoom sin entrar a la reunión.
+Cargas el video (o el audio .m4a) y la app saca la voz, las
+diapositivas que cambian, un resumen, una explicación, un esquema
+y un chat para preguntar sobre esa clase.
+
+Cómo abrirla
+------------
+Doble clic en iniciar.bat
+Deja abierta la ventana negra mientras la uses.
+El navegador entra en http://127.0.0.1:8765
+
+En Configurar eliges el proveedor: Grok, OpenAI, Gemini, Claude,
+Mistral, Groq, OpenRouter u otro compatible con OpenAI.
+La clave queda en data\settings.json, solo en esta computadora.
+Si la dejas en blanco, se conserva la ya guardada.
+Claude y OpenRouter no transcriben: elige otro para la voz.
+Grok también puede usar la variable XAI_API_KEY.
+
+Para un video grande usa "Elegir video" o la lista de Zoom.
+Eso no copia el archivo. Arrastrarlo sí lo copia.
+
+Avisos recoge lo que encargó el profesor: tarea, lectura,
+exposición, reunión, examen u otra fecha. Si hay un texto,
+lo copia o indica la captura y el minuto del video.
+En una clase ya hecha, pulsa Buscar avisos. No vuelve a
+transcribir el audio.
+
+Links junta las direcciones que se dijeron o que quedaron
+escritas en una diapositiva. No se inventan. Si una letra
+acentuada se guardó como un cuadrado y un número, al abrir
+la clase se restituye la vocal.
+
+Página en Netlify
+-----------------
+La carpeta se sube con Git. Netlify publica static/.
+Build command: node scripts/write-config.js
+Publish directory: static
+
+En el sitio, Environment variables:
+  SUPABASE_URL = https://ojvkzamnyrplyaersymu.supabase.co
+  SUPABASE_ANON_KEY = la clave anon (Project Settings, API)
+  SUPABASE_EMAIL = claseclara.app.user@gmail.com
+
+La contraseña no va en Git. Está en static\cloud-config.js
+de esta PC, en el campo password. En la web se escribe al entrar.
+
+En el teléfono, la app es ClaseClara.apk, en esta misma carpeta.
+El texto y las diapositivas se leen desde Supabase. Pega un
+enlace de Zoom (zoom.us/rec/play/) o carga un video del teléfono.
+El enlace lo prepara esta PC cuando iniciar.bat está abierto.
+El video no se sube a Supabase. No compartas el APK: abre tus clases.
+
+Escuchar lee en voz alta la pestaña que estás viendo:
+explicación, resumen, esquema, glosario, repaso, avisos,
+capturas o transcripción. Detener la corta. Si das play al
+video o cambias de pestaña, también se detiene. Usa una voz
+en español de Windows y no gasta la clave del proveedor.
+
+El costo depende del proveedor. Con Grok, la transcripción
+cuesta unos 0,10 USD por hora de audio y la explicación es
+una consulta más. Si a ese proveedor se le acaban los créditos,
+elige otro en Configurar y pulsa Reintentar.
+
+Necesitas Windows, Python 3.11 o más, y ffmpeg.

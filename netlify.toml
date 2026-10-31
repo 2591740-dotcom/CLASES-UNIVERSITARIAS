@@ -1,0 +1,8 @@
+[build]
+  publish = "static"
+  command = "node scripts/write-config.js"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # La clave anon es pública. La contraseña no se escribe en el sitio.
+  SECRETS_SCAN_OMIT_PATHS = "static/cloud-config.js"

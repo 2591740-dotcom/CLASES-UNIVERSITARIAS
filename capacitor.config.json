@@ -1,0 +1,8 @@
+{
+  "appId": "com.claseclara.app",
+  "appName": "ClaseClara",
+  "webDir": "static",
+  "android": {
+    "allowMixedContent": false
+  }
+}
