@@ -510,6 +510,10 @@ function dismissConfig() {
 
 function goHome() {
   if (window.CLASECLARA_HOLD) return;
+  if (document.querySelector("#prepare-modal")) {
+    cerrarPreparar();
+    return;
+  }
   const box = document.querySelector("#config");
   if (box && !box.hidden) {
     dismissConfig();
@@ -525,6 +529,10 @@ function goHome() {
 window.addEventListener("popstate", () => {
   if (ignorePop) {
     ignorePop = false;
+    return;
+  }
+  if (document.querySelector("#prepare-modal")) {
+    cerrarPreparar(true);
     return;
   }
   const box = document.querySelector("#config");
@@ -609,17 +617,7 @@ function phoneHome(classes, cursos) {
       <p class="kicker">${esc(ambito || "Tu clase, en claro")}</p>
       <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
       <h1>La misma clase, en este aparato.</h1>
-    </section>
-    <section class="panel">
-      <div class="drop" id="drop">
-        <label for="link">Enlace de Zoom</label>
-        <input id="link" type="text" placeholder="https://....zoom.us/rec/play/...">
-        <label for="file">Video o audio de este aparato</label>
-        <input id="file" type="file" accept="${FILE_ACCEPT}">
-        <div class="row">
-          <button class="primary" id="go" type="button">Preparar clase</button>
-        </div>
-      </div>
+      <button class="primary prepare-open" id="open-prepare" type="button">Preparar clase</button>
     </section>
     <h2>${esc(pack.nombre || "Clases")}</h2>
     <div class="grid">${mine}</div>`;
@@ -961,7 +959,61 @@ function abrirCursoModal(destino) {
   };
 }
 
+function cerrarPreparar(desdeAtras) {
+  const modal = document.querySelector("#prepare-modal");
+  if (!modal) return;
+  if (!desdeAtras && history.state && history.state.cc === "prepare") {
+    ignorePop = true;
+    history.back();
+  }
+  modal.remove();
+}
+
+function abrirPreparar() {
+  if (document.querySelector("#prepare-modal")) return;
+  const modal = document.createElement("div");
+  modal.id = "prepare-modal";
+  modal.className = "course-modal";
+  modal.innerHTML = `
+    <div class="course-card" role="dialog" aria-modal="true" aria-labelledby="prepare-titulo">
+      <div class="config-bar">
+        <h2 id="prepare-titulo">Preparar clase</h2>
+        <button class="ghost" id="prepare-close" type="button">Cerrar</button>
+      </div>
+      <div class="drop" id="drop">
+        <label for="link">Enlace de Zoom</label>
+        <input id="link" type="text" placeholder="https://....zoom.us/rec/play/..." autocomplete="off">
+        <label for="file">Video o audio de este aparato</label>
+        <input id="file" type="file" accept="${FILE_ACCEPT}">
+        <div class="row">
+          <button class="primary" id="go" type="button">Preparar clase</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  if (!history.state || history.state.cc !== "prepare") history.pushState({ cc: "prepare" }, "");
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) cerrarPreparar();
+  });
+  modal.querySelector("#prepare-close").onclick = () => cerrarPreparar();
+  modal.querySelector("#go").onclick = saveFromPhone;
+  const drop = modal.querySelector("#drop");
+  const fileInput = modal.querySelector("#file");
+  drop.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    drop.classList.add("over");
+  });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    drop.classList.remove("over");
+    const file = event.dataTransfer.files && event.dataTransfer.files[0];
+    if (file) setInputFile(fileInput, file);
+  });
+}
+
 async function showHome() {
+  cerrarPreparar(true);
   cerrarCursoModal();
   closeWikiPeek();
   stopSpeech();
@@ -997,12 +1049,10 @@ async function showHome() {
   }
   const pick = document.querySelector("#pick");
   if (pick) pick.onclick = chooseFile;
+  const openPrepare = document.querySelector("#open-prepare");
+  if (openPrepare) openPrepare.onclick = abrirPreparar;
   const go = document.querySelector("#go");
-  if (go) {
-    go.onclick = window.claseClaraCloud
-      ? saveFromPhone
-      : () => startPath(document.querySelector("#path").value.trim());
-  }
+  if (go) go.onclick = () => startPath(document.querySelector("#path").value.trim());
   document.querySelectorAll(".open-class").forEach((button) => {
     button.onclick = () => openClass(button.dataset.id);
   });
@@ -1188,6 +1238,7 @@ async function saveFromPhone() {
       file,
       onProgress: (text) => { button.textContent = text; },
     });
+    cerrarPreparar(true);
     await openClass(id);
   } catch (error) {
     alert(error.message);
@@ -1288,6 +1339,12 @@ async function saveTitle() {
     if (clase.study) clase.study.titulo = saved.title;
     document.querySelector("#class-heading").textContent = saved.title;
     document.title = saved.title;
+    const form = document.querySelector("#rename");
+    const opener = document.querySelector("#rename-open");
+    if (form && form.classList.contains("open")) {
+      form.classList.remove("open");
+      if (opener) opener.hidden = false;
+    }
   } catch (error) {
     alert(error.message);
   } finally {
@@ -2442,7 +2499,6 @@ function bindStudy() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.onclick = () => {
       elegirPestana(button.dataset.tab);
-      button.scrollIntoView({ inline: "nearest", block: "nearest" });
     };
   });
   document.querySelectorAll(".reveal").forEach((button) => {
@@ -2600,7 +2656,8 @@ async function openClass(id) {
   document.title = data.study?.titulo || data.title || "ClaseClara";
   app.innerHTML = studyHtml(data);
   bindStudy();
-  if (!history.state || history.state.cc !== "class") history.pushState({ cc: "class" }, "");
+  if (history.state && history.state.cc === "prepare") history.replaceState({ cc: "class" }, "");
+  else if (!history.state || history.state.cc !== "class") history.pushState({ cc: "class" }, "");
 }
 
 async function ask(question) {
