@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -133,6 +135,16 @@ def publish(class_id: str) -> None:
     if fecha:
         estudio["fecha_clase"] = fecha
         estudio["fecha_custom"] = bool(meta.get("fecha_custom"))
+    remote_fuentes = remote_estudio.get("fuentes") if isinstance(remote_estudio.get("fuentes"), list) else []
+    claves = fuentes_de_meta(meta)
+    publicas = limpiar_fuentes([*claves, *remote_fuentes], publicas=True)
+    if publicas:
+        estudio["fuentes"] = publicas
+    guardadas = meta.get("fuentes") if isinstance(meta.get("fuentes"), list) else []
+    locales = limpiar_fuentes([*guardadas, *claves])
+    if locales != limpiar_fuentes(guardadas):
+        meta["fuentes"] = locales
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     row = {
         "id": class_id,
         "titulo": (study.get("titulo") or meta.get("title") or "Clase")[:140],
@@ -207,6 +219,211 @@ def entrada_count(url: str) -> int:
     return count
 
 
+def fuente_zoom(url: str) -> str:
+    text = " ".join(str(url or "").split())
+    try:
+        cleaned = assert_zoom_url(text)
+    except engine.AppError:
+        return ""
+    parts = urllib.parse.urlsplit(cleaned)
+    host = (parts.hostname or "").lower()
+    path = parts.path
+    for marker in ("/rec/play/", "/rec/share/", "/rec/download/"):
+        if marker not in path:
+            continue
+        token = path.split(marker, 1)[1].strip("/").split("/", 1)[0]
+        if 8 <= len(token) <= 240:
+            return f"zoom:{host}/{token}"
+    return ""
+
+
+def fuente_youtube(url: str) -> str:
+    watched = engine.youtube_url(url)
+    found = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", watched or "")
+    if not found:
+        return ""
+    return f"yt:{found.group(1)}"
+
+
+def fuentes_de_url(url: str) -> list[str]:
+    return limpiar_fuentes([fuente_zoom(url), fuente_youtube(url)])
+
+
+def fuente_archivo(name: str, size: int) -> str:
+    try:
+        bytes_ = int(size)
+    except (TypeError, ValueError):
+        return ""
+    if bytes_ < 1024 or bytes_ > MAX_VIDEO:
+        return ""
+    stem = re.sub(r"[_-]+", " ", Path(str(name or "")).stem)
+    stem = re.sub(r"\s+\(\d+\)$", "", stem)
+    stem = " ".join(stem.lower().split())
+    if not stem or stem in {"fuente", "video", "audio", "clase", "clase por enlace"}:
+        return ""
+    return f"archivo:{bytes_}:{stem[:80]}"
+
+
+def fuente_ruta(path: Path) -> str:
+    try:
+        text = str(path.resolve()).lower()
+    except OSError:
+        return ""
+    if len(text) < 3 or len(text) > 360:
+        return ""
+    return f"ruta:{text}"
+
+
+def fuente_huella(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size < 1024 or size > MAX_VIDEO:
+        return ""
+    chunk = 1024 * 1024
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            digest.update(handle.read(chunk))
+            if size > chunk:
+                handle.seek(size - chunk)
+                digest.update(handle.read(chunk))
+    except OSError:
+        return ""
+    digest.update(str(size).encode("ascii"))
+    return "huella:" + digest.hexdigest()[:32]
+
+
+def clave_valida(key: str) -> bool:
+    text = str(key or "").strip()
+    if text.startswith("zoom:") and 14 <= len(text) <= 300:
+        return True
+    if re.fullmatch(r"yt:[A-Za-z0-9_-]{11}", text):
+        return True
+    if text.startswith("archivo:") and 12 <= len(text) <= 120 and text.count(":") >= 2:
+        return True
+    if re.fullmatch(r"huella:[0-9a-f]{32}", text):
+        return True
+    if text.startswith("ruta:") and 8 <= len(text) <= 400:
+        return True
+    return False
+
+
+def limpiar_fuentes(keys, *, publicas: bool = False) -> list[str]:
+    clean: list[str] = []
+    for item in keys or []:
+        key = str(item or "").strip()
+        if not clave_valida(key) or (publicas and key.startswith("ruta:")):
+            continue
+        if key not in clean:
+            clean.append(key)
+        if len(clean) >= 8:
+            break
+    return clean
+
+
+def fuentes_de_meta(meta: dict) -> list[str]:
+    keys: list[str] = []
+    stored = meta.get("fuentes")
+    if isinstance(stored, list):
+        keys.extend(str(item) for item in stored)
+    keys.extend(fuentes_de_url(str(meta.get("video_url") or "")))
+    keys.extend(fuentes_de_url(str(meta.get("youtube_url") or "")))
+    source = Path(str(meta.get("source") or ""))
+    if source.is_file():
+        try:
+            size = source.stat().st_size
+        except OSError:
+            size = 0
+        keys.append(fuente_archivo(source.name, size))
+        if source.name.lower() == "fuente.mp4":
+            keys.append(fuente_archivo(str(meta.get("title") or ""), size))
+        keys.append(fuente_ruta(source))
+        if not any(str(item).startswith("huella:") for item in keys):
+            keys.append(fuente_huella(source))
+    return limpiar_fuentes(keys)
+
+
+def claves_de_fila(row: dict) -> list[str]:
+    keys: list[str] = []
+    keys.extend(fuentes_de_url(str(row.get("video_url") or "")))
+    estudio = row.get("estudio") if isinstance(row.get("estudio"), dict) else {}
+    fuentes = estudio.get("fuentes") if isinstance(estudio, dict) else None
+    if isinstance(fuentes, list):
+        keys.extend(str(item) for item in fuentes)
+    return limpiar_fuentes(keys)
+
+
+def tipo_coincidencia(keys) -> str:
+    if any(str(key).startswith(("zoom:", "yt:")) for key in keys):
+        return "enlace"
+    return "video"
+
+
+def aviso_duplicado(titulo: str, tipo: str) -> str:
+    nombre = " ".join(str(titulo or "Clase").split())[:80] or "Clase"
+    cosa = "este enlace" if tipo == "enlace" else "este video"
+    return f"Ya cargaste {cosa} en «{nombre}». Lo detengo para no prepararlo otra vez."
+
+
+def fila_duplicada(rows, claves, excepto: str = "") -> dict | None:
+    wanted = set(limpiar_fuentes(claves))
+    if not wanted:
+        return None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        class_id = str(row.get("id") or "")
+        if not class_id or class_id == excepto:
+            continue
+        hit = wanted.intersection(claves_de_fila(row))
+        if not hit:
+            continue
+        titulo = row.get("titulo") or row.get("title") or "Clase"
+        return {
+            "id": class_id,
+            "titulo": str(titulo),
+            "tipo": tipo_coincidencia(hit),
+            "estado": str(row.get("estado") or row.get("status") or ""),
+            "creado": str(row.get("creado") or row.get("created") or ""),
+        }
+    return None
+
+
+def filas_fuentes() -> list:
+    if not configured():
+        return []
+    rows = _request("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio,estado,creado")
+    return rows if isinstance(rows, list) else []
+
+
+def guardar_fuentes(class_id: str, claves) -> None:
+    if not configured() or not _valid_id(class_id):
+        return
+    publicas = limpiar_fuentes(claves, publicas=True)
+    if not publicas:
+        return
+    rows = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=estudio",
+    )
+    estudio: dict = {}
+    if isinstance(rows, list) and rows and isinstance(rows[0].get("estudio"), dict):
+        estudio = dict(rows[0]["estudio"])
+    current = estudio.get("fuentes") if isinstance(estudio.get("fuentes"), list) else []
+    merged = limpiar_fuentes([*current, *publicas], publicas=True)
+    if merged == limpiar_fuentes(current, publicas=True):
+        return
+    estudio["fuentes"] = merged
+    _request(
+        "PATCH",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}",
+        {"estudio": estudio},
+        prefer="return=minimal",
+    )
+
+
 def public_video_url(url: str) -> str:
     text = str(url or "")
     if text.startswith("entrada:"):
@@ -278,7 +495,7 @@ def pending() -> list[dict]:
         return []
     rows = _request(
         "GET",
-        "/rest/v1/clases?estado=eq.pendiente&select=id,video_url,materia,titulo,estudio",
+        "/rest/v1/clases?estado=eq.pendiente&select=id,video_url,materia,titulo,estudio,creado",
     )
     if not isinstance(rows, list):
         return []
@@ -714,3 +931,41 @@ def self_test() -> None:
     assert prefer_remote(10, {"chat_key": "k", "actualizado": 10})
     assert prefer_remote(10, {"stt_key": "k", "actualizado": 11})
     assert not prefer_remote(12, {"chat_key": "k", "actualizado": 11})
+    token = "kw_Sxy3Jl7NRtokenXX"
+    host = "ucv-edu-pe.zoom.us"
+    play = f"https://{host}/rec/play/{token}?pwd=1"
+    share = f"https://{host}/rec/share/{token}"
+    down = f"https://{host}/rec/download/{token}/"
+    zoom = fuente_zoom(play)
+    assert zoom == f"zoom:{host}/{token}"
+    assert zoom == fuente_zoom(share) == fuente_zoom(down)
+    assert fuente_youtube("https://youtu.be/dQw4w9WgXcQ") == "yt:dQw4w9WgXcQ"
+    assert fuente_youtube("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=3") == "yt:dQw4w9WgXcQ"
+    assert fuente_archivo("clip (1).mp4", 5000) == fuente_archivo("clip.mp4", 5000) == "archivo:5000:clip"
+    assert fuente_archivo("Mi_Clase-final.mkv", 5000) == "archivo:5000:mi clase final"
+    assert fuente_archivo("fuente.mp4", 5000) == ""
+    assert fuente_archivo("Clase por enlace", 5000) == ""
+    assert fuente_archivo("video.mp4", 500) == ""
+    rows = [{
+        "id": "20260101-120000-abcdef",
+        "titulo": "Anatomía",
+        "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "estudio": {"fuentes": [zoom, "yt:dQw4w9WgXcQ"]},
+    }]
+    found = fila_duplicada(rows, fuentes_de_url(share))
+    assert found and found["id"] == rows[0]["id"] and found["tipo"] == "enlace"
+    assert aviso_duplicado(found["titulo"], found["tipo"]) == (
+        "Ya cargaste este enlace en «Anatomía». Lo detengo para no prepararlo otra vez."
+    )
+    assert fila_duplicada(rows, fuentes_de_url(share), excepto=rows[0]["id"]) is None
+    assert limpiar_fuentes(["ruta:c:\\clase.mp4", zoom], publicas=True) == [zoom]
+    videos = [{
+        "id": "20260101-120001-abcdef",
+        "titulo": "Sesión 2",
+        "video_url": "",
+        "estudio": {"fuentes": ["archivo:5000:clip"]},
+    }]
+    again = fila_duplicada(videos, [fuente_archivo("clip (1).mp4", 5000)])
+    assert again and again["tipo"] == "video"
+    assert "este video" in aviso_duplicado(again["titulo"], again["tipo"])
+    assert fila_duplicada(videos, [fuente_archivo("otro.mp4", 5000)]) is None
