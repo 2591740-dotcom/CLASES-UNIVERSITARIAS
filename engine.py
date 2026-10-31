@@ -3197,25 +3197,118 @@ CHAT_SYSTEM = (
 
 RESPUESTA_SYSTEM = (
     "Preparas la entrega de una tarea usando solo esta clase. "
-    "Devuelves un JSON con puede y texto. "
+    "Devuelves un JSON con puede, texto y preguntas. "
     "puede es true solo cuando la transcripción y el material alcanzan para redactar la entrega "
     "sin inventar datos, lecturas que no se leyeron, entrevistas, encuestas ni experiencias personales que la clase no contó. "
-    "Si falta algo esencial, puede es false y texto dice en una frase qué falta. "
-    "Si puede es true, texto es la respuesta que el alumno puede entregar: párrafos en español, "
-    "con lo explicado en clase, sin repetir el título y sin decir que eres una IA. "
+    "Si la tarea pide responder preguntas, o el caso trae varias preguntas, llenas preguntas en el mismo orden del encargo. "
+    "Cada elemento tiene numero, pregunta y respuesta. numero empieza en 1 y sigue de uno en uno. "
+    "pregunta es el enunciado tal como se encargó, sin contestarlo. "
+    "respuesta es solo la respuesta de esa pregunta, con lo explicado en clase. "
+    "No juntes dos preguntas en una respuesta ni cambies el orden. "
+    "Si una pregunta no se puede responder con la clase, su respuesta dice qué falta y no inventa el resto. "
+    "Si además piden citas o una experiencia que la clase no contó, igual respondes lo que sí se explicó y en esa respuesta dices que ese dato no se dio en clase. "
+    "puede es false solo cuando no se puede responder ninguna parte. Entonces preguntas va vacía y texto dice en una frase qué falta. "
+    "Cuando hay preguntas, texto queda vacío. "
+    "Si la tarea no tiene preguntas separadas, preguntas va vacía y texto es la entrega en párrafos, en español, "
+    "sin repetir el título y sin decir que eres una IA. "
     "No cites autores, cifras, fechas ni ejemplos que no estén en la clase. "
     "No escribas nada fuera del JSON."
 )
 
 
 def respuesta_schema() -> dict:
+    pregunta = _object_schema(
+        {
+            "numero": {"type": "integer"},
+            "pregunta": {"type": "string"},
+            "respuesta": {"type": "string"},
+        },
+        ["numero", "pregunta", "respuesta"],
+    )
     return _object_schema(
         {
             "puede": {"type": "boolean"},
             "texto": {"type": "string"},
+            "preguntas": {"type": "array", "items": pregunta},
         },
-        ["puede", "texto"],
+        ["puede", "texto", "preguntas"],
     )
+
+
+_PREGUNTA_LINEA = re.compile(r"^(?:pregunta\s*)?(\d{1,2})\s*[.)]\s+(\S.*)$", re.IGNORECASE)
+
+
+def _numero_pregunta(value: object, fallback: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return fallback
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number > 0 else fallback
+
+
+def texto_de_preguntas(preguntas: list[dict]) -> str:
+    bloques = []
+    for item in preguntas:
+        cabeza = f"{item['numero']}. {item['pregunta']}".strip()
+        cuerpo = str(item.get("respuesta") or "").strip()
+        bloques.append(cabeza + ("\n\n" + cuerpo if cuerpo else ""))
+    return "\n\n".join(bloques).strip()
+
+
+def partir_preguntas(texto: str) -> list[dict]:
+    """Separa un texto que ya trae 1. 2. 3. en enunciado y respuesta."""
+    lineas = str(texto or "").splitlines()
+    marcas: list[tuple[int, int, str]] = []
+    for index, line in enumerate(lineas):
+        match = _PREGUNTA_LINEA.match(line.strip())
+        if not match:
+            continue
+        marcas.append((index, int(match.group(1)), match.group(2).strip()))
+    if len(marcas) < 2 or marcas[0][1] != 1:
+        return []
+    chosen = [marcas[0]]
+    for mark in marcas[1:]:
+        if mark[1] != chosen[-1][1] + 1:
+            break
+        chosen.append(mark)
+    if len(chosen) < 2:
+        return []
+    preguntas = []
+    for pos, (line_index, _numero, pregunta) in enumerate(chosen):
+        end = chosen[pos + 1][0] if pos + 1 < len(chosen) else len(lineas)
+        respuesta = "\n".join(lineas[line_index + 1:end]).strip()
+        preguntas.append({
+            "numero": pos + 1,
+            "pregunta": pregunta[:2000],
+            "respuesta": respuesta[:8000],
+        })
+    return preguntas
+
+
+def preguntas_de_lista(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    preguntas = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        pregunta = " ".join(_as_text(item.get("pregunta")).split())
+        respuesta = _as_text(item.get("respuesta")).strip()
+        if not pregunta and not respuesta:
+            continue
+        preguntas.append({
+            "numero": _numero_pregunta(item.get("numero"), index),
+            "pregunta": pregunta[:2000],
+            "respuesta": respuesta[:8000],
+        })
+    numeros = [item["numero"] for item in preguntas]
+    if len(numeros) >= 2 and len(set(numeros)) == len(numeros):
+        preguntas.sort(key=lambda item: item["numero"])
+    for index, item in enumerate(preguntas, start=1):
+        item["numero"] = index
+    return preguntas[:40]
 
 
 def parse_respuesta(raw: str) -> dict:
@@ -3224,19 +3317,31 @@ def parse_respuesta(raw: str) -> dict:
     fenced = re.sub(r"\s*```$", "", fenced)
     start = fenced.find("{")
     end = fenced.rfind("}")
+    data = None
     if start >= 0 and end > start:
         try:
-            data = json.loads(fenced[start:end + 1])
+            parsed = json.loads(fenced[start:end + 1])
         except json.JSONDecodeError:
-            data = None
-        if isinstance(data, dict):
-            texto = _as_text(data.get("texto"))
-            if not texto:
-                raise AppError("La respuesta llegó vacía.")
-            puede = data.get("puede") is True or data.get("puede") == "true"
-            return {"puede": puede, "texto": texto[:20000].rstrip()}
+            parsed = None
+        if isinstance(parsed, dict):
+            data = parsed
+    if isinstance(data, dict):
+        texto = _as_text(data.get("texto")).strip()
+        preguntas = preguntas_de_lista(data.get("preguntas"))
+        if not preguntas:
+            preguntas = partir_preguntas(texto)
+        if preguntas:
+            texto = texto_de_preguntas(preguntas)
+        if not texto:
+            raise AppError("La respuesta llegó vacía.")
+        puede = data.get("puede") is True or data.get("puede") == "true"
+        return {"puede": puede, "texto": texto[:20000].rstrip(), "preguntas": preguntas}
     if len(fenced) > 200:
-        return {"puede": True, "texto": fenced[:20000].rstrip()}
+        texto = fenced[:20000].rstrip()
+        preguntas = partir_preguntas(texto)
+        if preguntas:
+            texto = texto_de_preguntas(preguntas)
+        return {"puede": True, "texto": texto, "preguntas": preguntas}
     raise AppError("No pude leer la respuesta. Inténtalo otra vez.")
 
 
@@ -3260,6 +3365,11 @@ def respuesta_de_tarea(study: dict, transcript: str, materia: str, aviso: dict, 
     ]
     raw = complete(messages, cfg, None, timeout=180)
     parsed = parse_respuesta(raw)
+    for item in parsed["preguntas"]:
+        item["pregunta"] = repair_accents(item["pregunta"], transcript)
+        item["respuesta"] = repair_accents(item["respuesta"], transcript)
+    if parsed["preguntas"]:
+        parsed["texto"] = texto_de_preguntas(parsed["preguntas"])
     parsed["texto"] = repair_accents(parsed["texto"], transcript)
     return parsed
 
@@ -3725,10 +3835,31 @@ def self_test() -> None:
     hecha = parse_respuesta('{"puede": true, "texto": "La praxia se explicó en clase."}')
     assert hecha["puede"] is True
     assert "praxia" in hecha["texto"]
+    assert hecha["preguntas"] == []
     negada = parse_respuesta('```json\n{"puede": false, "texto": "Falta la lectura."}\n```')
     assert negada["puede"] is False
     assert negada["texto"] == "Falta la lectura."
+    ordenada = parse_respuesta(json.dumps({
+        "puede": True,
+        "texto": "",
+        "preguntas": [
+            {"numero": 2, "pregunta": "¿Qué es la apraxia?", "respuesta": "No poder hacer el gesto."},
+            {"numero": 1, "pregunta": "¿Qué es la praxia?", "respuesta": "El gesto aprendido."},
+        ],
+    }, ensure_ascii=False))
+    assert [item["numero"] for item in ordenada["preguntas"]] == [1, 2]
+    assert ordenada["preguntas"][0]["pregunta"].startswith("¿Qué es la praxia?")
+    assert ordenada["texto"].startswith("1. ¿Qué es la praxia?")
+    assert "2. ¿Qué es la apraxia?" in ordenada["texto"]
+    suelto = parse_respuesta(
+        "1. ¿Qué es la praxia?\nEl gesto aprendido.\n\n2. ¿Qué es la apraxia?\nNo poder hacerlo.\n"
+        + ("x" * 160)
+    )
+    assert [item["numero"] for item in suelto["preguntas"]] == [1, 2]
+    assert suelto["preguntas"][0]["respuesta"] == "El gesto aprendido."
+    assert suelto["preguntas"][1]["respuesta"].startswith("No poder hacerlo.")
     assert parse_respuesta("x" * 220)["puede"] is True
+    assert parse_respuesta("x" * 220)["preguntas"] == []
     try:
         parse_respuesta("no")
         raise AssertionError("una respuesta corta no vale")

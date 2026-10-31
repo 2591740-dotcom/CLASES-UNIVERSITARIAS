@@ -2369,7 +2369,15 @@ function wordDeTarea(doc) {
   const paras = [parrafoWord(doc.clase, true, 32), parrafoWord(doc.tarea, true, 28)];
   if (doc.fecha) paras.push(parrafoWord(doc.fecha, false, 22));
   paras.push(parrafoWord("", false, 22));
-  String(doc.texto || "").split("\n").forEach((line) => paras.push(parrafoWord(line, false, 22)));
+  if (doc.preguntas && doc.preguntas.length) {
+    doc.preguntas.forEach((item) => {
+      paras.push(parrafoWord(`${item.numero}. ${item.pregunta}`, true, 24));
+      String(item.respuesta || "").split("\n").forEach((line) => paras.push(parrafoWord(line, false, 22)));
+      paras.push(parrafoWord("", false, 22));
+    });
+  } else {
+    String(doc.texto || "").split("\n").forEach((line) => paras.push(parrafoWord(line, false, 22)));
+  }
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paras.join("")}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>`;
   return zipStore([
@@ -2422,12 +2430,16 @@ function lineasPdf(doc) {
   partirLinea(doc.tarea, 78).forEach((text) => lines.push({ text, size: 13, gap: 18 }));
   if (doc.fecha) lines.push({ text: doc.fecha, size: 11, gap: 18 });
   lines.push({ text: "", size: 11, gap: 10 });
-  String(doc.texto || "").split("\n").forEach((paragraph) => {
+  const bloques = doc.preguntas && doc.preguntas.length
+    ? doc.preguntas.flatMap((item) => [`${item.numero}. ${item.pregunta}`, "", ...(String(item.respuesta || "").split("\n")), ""])
+    : String(doc.texto || "").split("\n");
+  bloques.forEach((paragraph) => {
     if (!paragraph.trim()) {
       lines.push({ text: "", size: 11, gap: 10 });
       return;
     }
-    partirLinea(paragraph.trim(), 90).forEach((text) => lines.push({ text, size: 11, gap: 15 }));
+    const pregunta = /^\d{1,2}\.\s+\S/.test(paragraph.trim());
+    partirLinea(paragraph.trim(), 90).forEach((text) => lines.push({ text, size: pregunta ? 12 : 11, gap: 15 }));
     lines.push({ text: "", size: 11, gap: 8 });
   });
   return lines;
@@ -2525,19 +2537,68 @@ async function entregarArchivo(blob, name, nota) {
   }
 }
 
-function documentoTarea(indice, texto) {
+function preguntasDeRespuesta(data) {
+  const payload = data && typeof data === "object" ? data : { texto: data };
+  const lista = Array.isArray(payload.preguntas) ? payload.preguntas : [];
+  const limpias = [];
+  lista.forEach((item, index) => {
+    if (!item || typeof item !== "object") return;
+    const pregunta = String(item.pregunta || "").replace(/\s+/g, " ").trim();
+    const respuesta = String(item.respuesta || "").trim();
+    if (!pregunta && !respuesta) return;
+    const numero = Number(item.numero);
+    limpias.push({
+      numero: Number.isInteger(numero) && numero > 0 ? numero : index + 1,
+      pregunta: pregunta.slice(0, 2000),
+      respuesta: respuesta.slice(0, 8000),
+    });
+  });
+  const numeros = limpias.map((item) => item.numero);
+  if (limpias.length >= 2 && new Set(numeros).size === numeros.length) {
+    limpias.sort((a, b) => a.numero - b.numero);
+  }
+  if (limpias.length) {
+    return limpias.map((item, index) => ({ ...item, numero: index + 1 }));
+  }
+  const lineas = String(payload.texto || "").split("\n");
+  const marcas = [];
+  lineas.forEach((line, index) => {
+    const match = line.trim().match(/^(?:pregunta\s*)?(\d{1,2})\s*[.)]\s+(\S.*)$/i);
+    if (!match) return;
+    marcas.push({ index, numero: Number(match[1]), pregunta: match[2].trim() });
+  });
+  if (marcas.length < 2 || marcas[0].numero !== 1) return [];
+  const chosen = [marcas[0]];
+  for (let i = 1; i < marcas.length; i += 1) {
+    if (marcas[i].numero !== chosen[chosen.length - 1].numero + 1) break;
+    chosen.push(marcas[i]);
+  }
+  if (chosen.length < 2) return [];
+  return chosen.map((mark, pos) => {
+    const end = chosen[pos + 1] ? chosen[pos + 1].index : lineas.length;
+    return {
+      numero: pos + 1,
+      pregunta: mark.pregunta.slice(0, 2000),
+      respuesta: lineas.slice(mark.index + 1, end).join("\n").trim().slice(0, 8000),
+    };
+  });
+}
+
+function documentoTarea(indice, data) {
   const study = (clase && clase.study) || {};
   const aviso = (study.avisos || [])[indice] || {};
+  const payload = data && typeof data === "object" ? data : { texto: data };
   return {
     clase: study.titulo || (clase && clase.title) || "Clase",
     tarea: aviso.titulo || "Tarea",
     fecha: aviso.fecha ? `Presentar: ${aviso.fecha}` : "",
-    texto,
+    texto: String(payload.texto || ""),
+    preguntas: preguntasDeRespuesta(payload),
   };
 }
 
-async function exportarTarea(indice, texto, formato) {
-  const doc = documentoTarea(indice, texto);
+async function exportarTarea(indice, data, formato) {
+  const doc = documentoTarea(indice, data);
   const blob = formato === "pdf" ? pdfDeTarea(doc) : wordDeTarea(doc);
   const box = document.querySelector(`.tarea-respuesta[data-aviso="${indice}"]`);
   const nota = box ? box.querySelector(".respuesta-nota") : null;
@@ -2550,18 +2611,27 @@ async function exportarTarea(indice, texto, formato) {
   }
 }
 
-function pintarRespuesta(box, texto, indice) {
+function pintarRespuesta(box, data, indice) {
+  const payload = data && typeof data === "object" ? data : { texto: data };
+  const preguntas = preguntasDeRespuesta(payload);
+  const cuerpo = preguntas.length
+    ? preguntas.map((item) => `
+      <article class="respuesta-pregunta">
+        <p class="respuesta-enunciado"><span class="respuesta-num">${item.numero}.</span> <span>${esc(item.pregunta)}</span></p>
+        ${item.respuesta ? `<div class="respuesta-cuerpo">${rich(item.respuesta)}</div>` : ""}
+      </article>`).join("")
+    : `<div class="respuesta-texto">${rich(String(payload.texto || ""))}</div>`;
   const vista = box.querySelector(".respuesta-vista");
   vista.hidden = false;
   vista.innerHTML = `
     <p class="kicker">Vista previa</p>
-    <div class="respuesta-texto">${rich(texto)}</div>
+    ${cuerpo}
     <div class="row">
       <button class="ghost export-word" type="button">Word</button>
       <button class="ghost export-pdf" type="button">PDF</button>
     </div>`;
-  vista.querySelector(".export-word").onclick = () => exportarTarea(indice, texto, "word");
-  vista.querySelector(".export-pdf").onclick = () => exportarTarea(indice, texto, "pdf");
+  vista.querySelector(".export-word").onclick = () => exportarTarea(indice, payload, "word");
+  vista.querySelector(".export-pdf").onclick = () => exportarTarea(indice, payload, "pdf");
 }
 
 async function verRespuesta(button) {
@@ -2583,7 +2653,7 @@ async function verRespuesta(button) {
       button.hidden = true;
       return;
     }
-    pintarRespuesta(box, data.texto || "", indice);
+    pintarRespuesta(box, data, indice);
     button.hidden = true;
   } catch (error) {
     button.disabled = false;

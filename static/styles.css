@@ -407,6 +407,21 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 }
 .respuesta-vista .kicker { margin-bottom: 6px; }
 .respuesta-texto p { margin: 0 0 8px; }
+.respuesta-pregunta { margin: 0 0 14px; }
+.respuesta-pregunta:last-of-type { margin-bottom: 8px; }
+.respuesta-enunciado {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 0 0 4px;
+  font-weight: 650;
+}
+.respuesta-num {
+  flex: 0 0 auto;
+  color: var(--brass);
+  font-variant-numeric: tabular-nums;
+}
+.respuesta-cuerpo p { margin: 0 0 8px; }
 .respuesta-vista .row { margin-top: 4px; }
 .aviso .lectura {
   background: #fff;

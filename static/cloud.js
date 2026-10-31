@@ -838,6 +838,60 @@
     return { chat };
   }
 
+  function textoDePreguntas(preguntas) {
+    return preguntas.map((item) => {
+      const cabeza = `${item.numero}. ${item.pregunta}`.trim();
+      return item.respuesta ? `${cabeza}\n\n${item.respuesta}` : cabeza;
+    }).join("\n\n").trim();
+  }
+
+  function partirPreguntas(texto) {
+    const lineas = String(texto || "").split("\n");
+    const marcas = [];
+    lineas.forEach((line, index) => {
+      const match = line.trim().match(/^(?:pregunta\s*)?(\d{1,2})\s*[.)]\s+(\S.*)$/i);
+      if (!match) return;
+      marcas.push({ index, numero: Number(match[1]), pregunta: match[2].trim() });
+    });
+    if (marcas.length < 2 || marcas[0].numero !== 1) return [];
+    const chosen = [marcas[0]];
+    for (let i = 1; i < marcas.length; i += 1) {
+      if (marcas[i].numero !== chosen[chosen.length - 1].numero + 1) break;
+      chosen.push(marcas[i]);
+    }
+    if (chosen.length < 2) return [];
+    return chosen.map((mark, pos) => {
+      const end = chosen[pos + 1] ? chosen[pos + 1].index : lineas.length;
+      return {
+        numero: pos + 1,
+        pregunta: mark.pregunta.slice(0, 2000),
+        respuesta: lineas.slice(mark.index + 1, end).join("\n").trim().slice(0, 8000),
+      };
+    });
+  }
+
+  function preguntasDeLista(raw) {
+    if (!Array.isArray(raw)) return [];
+    const preguntas = [];
+    raw.forEach((item, index) => {
+      if (!item || typeof item !== "object") return;
+      const pregunta = String(item.pregunta || "").replace(/\s+/g, " ").trim();
+      const respuesta = String(item.respuesta || "").trim();
+      if (!pregunta && !respuesta) return;
+      const numero = Number(item.numero);
+      preguntas.push({
+        numero: Number.isInteger(numero) && numero > 0 ? numero : index + 1,
+        pregunta: pregunta.slice(0, 2000),
+        respuesta: respuesta.slice(0, 8000),
+      });
+    });
+    const numeros = preguntas.map((item) => item.numero);
+    if (preguntas.length >= 2 && new Set(numeros).size === numeros.length) {
+      preguntas.sort((a, b) => a.numero - b.numero);
+    }
+    return preguntas.slice(0, 40).map((item, index) => ({ ...item, numero: index + 1 }));
+  }
+
   function parseRespuesta(raw) {
     let text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
     const start = text.indexOf("{");
@@ -845,13 +899,25 @@
     if (start >= 0 && end > start) {
       try {
         const data = JSON.parse(text.slice(start, end + 1));
-        const texto = String(data && data.texto || "").trim();
+        let preguntas = preguntasDeLista(data && data.preguntas);
+        let texto = String(data && data.texto || "").trim();
+        if (!preguntas.length) preguntas = partirPreguntas(texto);
+        if (preguntas.length) texto = textoDePreguntas(preguntas);
         if (texto) {
-          return { puede: data.puede === true || data.puede === "true", texto: texto.slice(0, 20000) };
+          return {
+            puede: data.puede === true || data.puede === "true",
+            texto: texto.slice(0, 20000),
+            preguntas,
+          };
         }
       } catch { /* el texto largo de abajo todavía puede servir */ }
     }
-    if (text.length > 200) return { puede: true, texto: text.slice(0, 20000) };
+    if (text.length > 200) {
+      let preguntas = partirPreguntas(text);
+      let texto = text.slice(0, 20000);
+      if (preguntas.length) texto = textoDePreguntas(preguntas);
+      return { puede: true, texto, preguntas };
+    }
     throw new Error("No pude leer la respuesta. Inténtalo otra vez.");
   }
 
@@ -873,7 +939,7 @@
     const spoken = transcript.text || (Array.isArray(transcript.lines)
       ? transcript.lines.map((line) => `[${line.stamp || ""}] ${line.speaker || ""}: ${line.text || ""}`).join("\n")
       : "");
-    const system = "Preparas la entrega de una tarea usando solo esta clase. Devuelves un JSON con puede y texto. puede es true solo cuando la transcripción y el material alcanzan para redactar la entrega sin inventar datos, lecturas que no se leyeron, entrevistas, encuestas ni experiencias personales que la clase no contó. Si falta algo esencial, puede es false y texto dice en una frase qué falta. Si puede es true, texto es la respuesta que el alumno puede entregar: párrafos en español, con lo explicado en clase, sin repetir el título y sin decir que eres una IA. No cites autores, cifras, fechas ni ejemplos que no estén en la clase. No escribas nada fuera del JSON.";
+    const system = "Preparas la entrega de una tarea usando solo esta clase. Devuelves un JSON con puede, texto y preguntas. puede es true solo cuando la transcripción y el material alcanzan para redactar la entrega sin inventar datos, lecturas que no se leyeron, entrevistas, encuestas ni experiencias personales que la clase no contó. Si la tarea pide responder preguntas, o el caso trae varias preguntas, llenas preguntas en el mismo orden del encargo. Cada elemento tiene numero, pregunta y respuesta. numero empieza en 1 y sigue de uno en uno. pregunta es el enunciado tal como se encargó, sin contestarlo. respuesta es solo la respuesta de esa pregunta, con lo explicado en clase. No juntes dos preguntas en una respuesta ni cambies el orden. Si una pregunta no se puede responder con la clase, su respuesta dice qué falta y no inventa el resto. Si además piden citas o una experiencia que la clase no contó, igual respondes lo que sí se explicó y en esa respuesta dices que ese dato no se dio en clase. puede es false solo cuando no se puede responder ninguna parte. Entonces preguntas va vacía y texto dice en una frase qué falta. Cuando hay preguntas, texto queda vacío. Si la tarea no tiene preguntas separadas, preguntas va vacía y texto es la entrega en párrafos, en español, sin repetir el título y sin decir que eres una IA. No cites autores, cifras, fechas ni ejemplos que no estén en la clase. No escribas nada fuera del JSON.";
     const encargo = `Tarea a responder ahora:\nTítulo: ${aviso.titulo || "Tarea"}\nPresentar: ${aviso.fecha || "no se dijo"}\nQué encargó: ${aviso.detalle || "no hay más detalle"}\nTexto o lectura leída en clase: ${aviso.texto || "no se leyó un texto en la clase"}`;
     const messages = [
       { role: "system", content: system },
