@@ -1312,6 +1312,7 @@ async function retryJob(id, retranscribe) {
 
 async function removeClass(id) {
   if (!confirm("¿Borrar esta clase de ClaseClara? El video original no se toca.")) return;
+  if (!confirm("Confirma otra vez. La clase se borra y no se puede recuperar.")) return;
   await api(`/api/classes/${id}`, { method: "DELETE" });
   showHome();
 }
@@ -1372,16 +1373,9 @@ function openFrame(button) {
   if (!src) return;
   const box = ensureFrameBox();
   const img = box.querySelector("img");
-  const label = box.querySelector(".lightbox-label");
-  const jump = box.querySelector("#frame-jump");
   frameView = { scale: 1, x: 0, y: 0 };
   img.src = src;
   img.alt = button.dataset.label || "Captura";
-  label.textContent = button.dataset.label || "";
-  const time = button.dataset.time || "";
-  jump.hidden = !time;
-  jump.dataset.time = time;
-  jump.textContent = time ? `Ver en el video ${time}` : "";
   paintFrame();
   box.hidden = false;
   document.body.classList.add("seeing-frame");
@@ -1393,14 +1387,7 @@ function ensureFrameBox() {
   box.id = "frame-lightbox";
   box.hidden = true;
   box.innerHTML = `
-    <div class="lightbox-bar">
-      <p class="lightbox-label"></p>
-      <button type="button" id="frame-out" aria-label="Alejar">−</button>
-      <button type="button" id="frame-in" aria-label="Acercar">+</button>
-      <button type="button" id="frame-fit">Ajustar</button>
-      <button type="button" id="frame-jump" hidden>Ver en el video</button>
-      <button type="button" id="frame-close">Cerrar</button>
-    </div>
+    <button type="button" id="frame-close">Cerrar</button>
     <div class="lightbox-stage">
       <img alt="">
     </div>`;
@@ -1421,23 +1408,6 @@ function ensureFrameBox() {
     paintFrame();
   };
   box.querySelector("#frame-close").onclick = closeFrame;
-  box.querySelector("#frame-fit").onclick = () => {
-    frameView = { scale: 1, x: 0, y: 0 };
-    paintFrame();
-  };
-  box.querySelector("#frame-in").onclick = () => {
-    frameView = zoomFrame(frameView, frameView.scale * 1.4, 0, 0);
-    paintFrame();
-  };
-  box.querySelector("#frame-out").onclick = () => {
-    frameView = zoomFrame(frameView, frameView.scale / 1.4, 0, 0);
-    paintFrame();
-  };
-  box.querySelector("#frame-jump").onclick = () => {
-    const seconds = parseTime(box.querySelector("#frame-jump").dataset.time || "");
-    closeFrame();
-    if (seconds != null) seekClass(seconds);
-  };
   stage.addEventListener("wheel", (event) => {
     event.preventDefault();
     const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
@@ -1643,7 +1613,7 @@ function noticesBanner(data) {
   return `<aside class="banner avisos-banner">
     <p class="kicker">Avisos de esta clase</p>
     <ul>${lines}</ul>
-    <button class="ghost" id="open-avisos" type="button">Ver el detalle</button>
+    <button class="aviso-link" id="open-avisos" type="button">Ver el detalle</button>
   </aside>`;
 }
 
@@ -1656,7 +1626,7 @@ function avisoShot(data, index, time) {
 function avisoAction() {
   return `<div class="aviso-action">
     <button class="primary" id="find-avisos" type="button">Buscar avisos</button>
-    <p class="note">Vuelve a leer lo que se dijo, sin transcribir otra vez. Completa la materia, la sesión, los enlaces de la explicación y los casos, si el profesor presentó alguno. Si ya guardaste el nombre o la materia, no los cambia.</p>
+    <p class="note">Vuelve a leer lo que se dijo, sin transcribir otra vez. Si ya guardaste el nombre, no lo cambia.</p>
   </div>`;
 }
 
@@ -2412,6 +2382,22 @@ function bindMiniPlayer() {
   watch();
 }
 
+function elegirPestana(id) {
+  stopSpeech();
+  closeWikiPeek();
+  document.querySelectorAll("[data-tab]").forEach((tabButton) => {
+    tabButton.setAttribute("aria-selected", tabButton.dataset.tab === id ? "true" : "false");
+  });
+  document.querySelectorAll("[data-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.panel !== id;
+  });
+}
+
+function abrirAvisos() {
+  elegirPestana("avisos");
+  document.querySelector("[data-panel='avisos']")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function bindStudy() {
   document.querySelector("#back").onclick = goHome;
   const cursoClase = document.querySelector("#clase-curso");
@@ -2447,9 +2433,7 @@ function bindStudy() {
   const findAvisos = document.querySelector("#find-avisos");
   if (findAvisos) findAvisos.onclick = () => retryJob(clase.id, false);
   const openAvisos = document.querySelector("#open-avisos");
-  if (openAvisos) {
-    openAvisos.onclick = () => document.querySelector('[data-tab="avisos"]')?.click();
-  }
+  if (openAvisos) openAvisos.onclick = () => abrirAvisos();
   document.querySelector("#delete").onclick = () => removeClass(clase.id);
   const listen = document.querySelector("#listen");
   if (listen) listen.onclick = startSpeech;
@@ -2457,14 +2441,7 @@ function bindStudy() {
   if (rate) rate.onclick = cycleSpeechRate;
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.onclick = () => {
-      stopSpeech();
-      closeWikiPeek();
-      document.querySelectorAll("[data-tab]").forEach((tabButton) => {
-        tabButton.setAttribute("aria-selected", tabButton === button ? "true" : "false");
-      });
-      document.querySelectorAll("[data-panel]").forEach((panel) => {
-        panel.hidden = panel.dataset.panel !== button.dataset.tab;
-      });
+      elegirPestana(button.dataset.tab);
       button.scrollIntoView({ inline: "nearest", block: "nearest" });
     };
   });
