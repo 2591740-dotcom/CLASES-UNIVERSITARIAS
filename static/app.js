@@ -36,6 +36,11 @@ function fechaIso(value) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+function horaValida(value) {
+  const text = String(value || "").trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : "";
+}
+
 function fechaEnTexto(text) {
   const raw = String(text || "");
   const tagged = raw.match(/(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)/i);
@@ -816,6 +821,13 @@ async function saveConfig() {
   }
 }
 
+function cabezaLista(titulo, hay) {
+  const boton = hay
+    ? `<button class="ghost" id="ordenar-fecha" type="button">Ordenar por fecha</button>`
+    : "";
+  return `<div class="list-head"><h2>${esc(titulo)}</h2>${boton}</div>`;
+}
+
 function phoneHome(classes, cursos) {
   const list = Array.isArray(classes) ? classes : [];
   const pack = cursos || { items: [], activo: "", nombre: "" };
@@ -833,7 +845,7 @@ function phoneHome(classes, cursos) {
       <h1>La mejor forma de Aprender.</h1>
       <button class="primary prepare-open" id="open-prepare" type="button">Preparar clase</button>
     </section>
-    <h2>${esc(pack.nombre || "Clases")}</h2>
+    ${cabezaLista(pack.nombre || "Clases", list.length > 0)}
     <div class="grid">${mine}</div>`;
 }
 
@@ -881,7 +893,7 @@ function homeHtml(classes, status, cursos) {
         <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. El nombre de la clase sale de lo que se dijo; si queda mal, se corrige al abrirla.</p>
       </div>
     </section>
-    <h2>${esc(pack.nombre || "Clases ya hechas")}</h2>
+    ${cabezaLista(pack.nombre || "Clases ya hechas", ordenadas.length > 0)}
     <div class="grid">${mine}</div>`;
 }
 
@@ -925,13 +937,20 @@ function cardHtml(item) {
   const avisos = Number(item.avisos) || 0;
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
   const fecha = fechaIso(item.fecha);
+  const hora = horaValida(item.hora);
+  const reloj = hora ? `<span class="card-hora">${esc(hora)}</span>` : "";
   return `
-    <article class="card" data-id="${esc(item.id)}">
-      <span class="status ${esc(item.status)}">${esc(state)}</span>
-      ${flag}
-      <label class="card-date">Fecha
-        <input class="fecha-clase" type="date" data-id="${esc(item.id)}" value="${esc(fecha)}" aria-label="Fecha de la clase">
-      </label>
+    <article class="card" data-id="${esc(item.id)}" data-fecha="${esc(fecha)}" data-hora="${esc(hora)}">
+      <div class="card-top">
+        <div class="card-marks">
+          <span class="status ${esc(item.status)}">${esc(state)}</span>
+          ${flag}
+        </div>
+        <div class="card-when">
+          <input class="fecha-clase" type="date" data-id="${esc(item.id)}" value="${esc(fecha)}" aria-label="Fecha de la clase">
+          ${reloj}
+        </div>
+      </div>
       <h3>${esc(item.title || "Clase")}</h3>
       ${extra ? `<p>${esc(extra)}</p>` : ""}
       <div class="actions">
@@ -1327,6 +1346,11 @@ async function showHome() {
     input.addEventListener("pointerdown", (event) => event.stopPropagation());
     input.addEventListener("change", () => guardarFecha(input));
   });
+  document.querySelectorAll(".card-when").forEach((box) => {
+    box.addEventListener("pointerdown", (event) => event.stopPropagation());
+  });
+  const ordenarFecha = document.querySelector("#ordenar-fecha");
+  if (ordenarFecha) ordenarFecha.onclick = () => ordenarPorFecha();
   document.querySelectorAll(".open-class").forEach((button) => {
     button.onclick = () => openClass(button.dataset.id);
   });
@@ -1367,6 +1391,30 @@ function idsDelGrid(grid) {
   return [...grid.querySelectorAll(".card")]
     .map((card) => card.dataset.id)
     .filter((id) => /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(id || ""));
+}
+
+function claveOrdenFecha(card) {
+  const fecha = card.dataset.fecha || card.querySelector(".fecha-clase")?.value || "";
+  const hora = card.dataset.hora || "";
+  const dia = /^\d{4}-\d{2}-\d{2}$/.test(fecha) ? fecha : "0000-00-00";
+  const reloj = horaValida(hora) || "00:00";
+  return `${dia}T${reloj}`;
+}
+
+async function ordenarPorFecha() {
+  const grid = document.querySelector(".grid");
+  const button = document.querySelector("#ordenar-fecha");
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll(".card")];
+  if (cards.length < 2) return;
+  cards.sort((a, b) => claveOrdenFecha(b).localeCompare(claveOrdenFecha(a)));
+  cards.forEach((card) => grid.appendChild(card));
+  if (button) button.disabled = true;
+  try {
+    await guardarOrdenVisible(grid);
+  } finally {
+    if (button && button.isConnected) button.disabled = false;
+  }
 }
 
 async function guardarOrdenVisible(grid) {
@@ -1819,6 +1867,21 @@ async function guardarFecha(input) {
     });
     input.value = fechaIso(saved.fecha) || value;
     input.dataset.prev = input.value;
+    const card = input.closest(".card");
+    if (card) {
+      card.dataset.fecha = input.value;
+      const hora = horaValida(saved.hora);
+      card.dataset.hora = hora;
+      const cuando = card.querySelector(".card-when");
+      let span = cuando && cuando.querySelector(".card-hora");
+      if (cuando && hora && !span) {
+        span = document.createElement("span");
+        span.className = "card-hora";
+        cuando.appendChild(span);
+      }
+      if (span && hora) span.textContent = hora;
+      if (span && !hora) span.remove();
+    }
   } catch (error) {
     alert(error.message);
     input.value = anterior;

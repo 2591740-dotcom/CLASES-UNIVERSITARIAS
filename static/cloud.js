@@ -347,15 +347,25 @@
     return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   }
 
+  function horaClase(value) {
+    const text = String(value || "").trim();
+    return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : "";
+  }
+
   function card(row) {
     const estado = row.estado || "lista";
     const started = Date.parse(row.creado || "");
     const avisos = Array.isArray(row.estudio?.avisos) ? row.estudio.avisos.length : 0;
     const watch = typeof youtubeHref === "function" ? youtubeHref(row.video_url || "") : "";
     const remote = watch ? "" : playback(row.video_url || "");
+    const estudio = row.estudio || {};
+    const custom = Boolean(estudio.titulo_custom);
+    const titulo = custom
+      ? (estudio.titulo || row.titulo || "Clase")
+      : (row.titulo || estudio.titulo || "Clase");
     return {
       id: row.id,
-      title: row.titulo || "Clase",
+      title: titulo,
       materia: row.materia || "",
       curso_id: row.curso_id || "",
       status: viewStatus(estado),
@@ -364,10 +374,11 @@
       error: estado === "error" ? (row.detalle || "Se detuvo.") : "",
       created: row.creado || "",
       fecha: fechaIso(row.estudio && row.estudio.fecha_clase),
+      hora: horaClase(row.estudio && row.estudio.hora_clase),
       started: Number.isFinite(started) ? Math.floor(started / 1000) : 0,
       duration: row.duracion || 0,
       avisos,
-      title_custom: false,
+      title_custom: custom,
       media_kind: watch ? "youtube" : (remote ? "video" : ""),
       media_src: watch || remote,
       youtube_state: watch ? "listo" : "",
@@ -971,9 +982,19 @@
     const title = url.match(/^\/api\/classes\/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})\/title$/);
     if (title && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
+      const nombre = String(body.title || "").replace(/\s+/g, " ").trim().slice(0, 140);
+      if (!nombre) throw new Error("Escribe un nombre.");
+      const row = await one(title[1]);
+      const estudio = {
+        ...(row.estudio || {}),
+        titulo: nombre,
+        titulo_custom: true,
+        titulo_en: Math.floor(Date.now() / 1000),
+      };
       await rest("PATCH", `/rest/v1/clases?id=eq.${title[1]}`, {
-        titulo: String(body.title || "").slice(0, 140),
+        titulo: nombre,
         materia: String(body.materia || "").slice(0, 120),
+        estudio,
       });
       return card(await one(title[1]));
     }

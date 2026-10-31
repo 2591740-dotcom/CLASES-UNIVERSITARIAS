@@ -365,6 +365,7 @@ def public_meta(meta: dict) -> dict:
         "error": meta.get("error") or "",
         "created": meta.get("created") or "",
         "fecha": engine.fecha_iso(str(meta.get("fecha") or "")),
+        "hora": engine.hora_valida(str(meta.get("hora") or "")),
         "duration": meta.get("duration") or 0,
         "title_custom": bool(meta.get("title_custom")),
         "frames": meta.get("frames") or [],
@@ -387,7 +388,7 @@ def list_classes() -> list[dict]:
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        meta = completar_fecha(folder.name, meta)
+        meta = completar_hora(folder.name, completar_fecha(folder.name, meta))
         row = public_meta(meta)
         row["curso_id"] = str(meta.get("curso_id") or "")
         study = read_json(folder / "study.json", None)
@@ -470,6 +471,14 @@ def media_kind(path: Path) -> str | None:
     return None
 
 
+def anotar_hora(meta: dict, path: Path, filename: str = "", usar_mtime: bool = False) -> None:
+    if engine.hora_valida(str(meta.get("hora") or "")):
+        return
+    hora = engine.hora_de_video(path, filename=filename, usar_mtime=usar_mtime)
+    if hora:
+        meta["hora"] = hora
+
+
 def completar_fecha(class_id: str, meta: dict) -> dict:
     saved = engine.fecha_iso(str(meta.get("fecha") or ""))
     if meta.get("fecha_custom") and saved:
@@ -502,6 +511,23 @@ def set_fecha(class_id: str, raw: str) -> dict:
     return public_meta(updated)
 
 
+def completar_hora(class_id: str, meta: dict) -> dict:
+    if engine.hora_valida(str(meta.get("hora") or "")):
+        return meta
+    source = Path(str(meta.get("source") or ""))
+    origen = str(meta.get("fecha_origen") or "")
+    usar_mtime = origen in {"", "mtime"} and source.name.lower() != "fuente.mp4"
+    hora = engine.hora_de_video(source, usar_mtime=usar_mtime)
+    if not hora:
+        return meta
+    updated = update_meta(class_id, hora=hora)
+    try:
+        cloud.save_hora(class_id, hora)
+    except Exception:
+        traceback.print_exc()
+    return updated
+
+
 def completar_fechas() -> None:
     if not CLASSES.is_dir():
         return
@@ -521,8 +547,27 @@ def completar_fechas() -> None:
             continue
 
 
+def completar_horas() -> None:
+    if not CLASSES.is_dir():
+        return
+    for folder in CLASSES.iterdir():
+        meta_path = folder / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", folder.name):
+            continue
+        try:
+            completar_hora(folder.name, meta)
+        except engine.AppError:
+            continue
+
+
 def class_detail(class_id: str) -> dict:
-    meta = completar_fecha(class_id, read_meta(class_id))
+    meta = completar_hora(class_id, completar_fecha(class_id, read_meta(class_id)))
     folder = class_dir(class_id)
     transcript = read_json(folder / "transcript.json", {})
     study = read_json(folder / "study.json", None)
@@ -929,6 +974,7 @@ def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = ""
             meta["fecha"] = iso
             meta["fecha_origen"] = origin
             meta["fecha_custom"] = False
+        anotar_hora(meta, dest, usar_mtime=False)
         meta["fuentes"] = cloud.fuentes_de_meta(meta)
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
@@ -1016,6 +1062,9 @@ def adopt_pending() -> None:
                 hint=hinted,
                 usar_mtime=False,
             )
+        hora = engine.hora_de_video(dest, filename=str(row.get("titulo") or ""), usar_mtime=False)
+        if not hora:
+            hora = engine.hora_valida(str(estudio.get("hora_clase") or ""))
         meta = {
             "id": class_id,
             "title": str(row.get("titulo") or "Clase por enlace")[:140],
@@ -1027,6 +1076,7 @@ def adopt_pending() -> None:
             "fecha": iso,
             "fecha_origen": origin,
             "fecha_custom": custom,
+            "hora": hora,
             "status": "processing",
             "stage": "audio",
             "detail": "Preparando el video",
@@ -1044,6 +1094,11 @@ def adopt_pending() -> None:
         if iso and not custom:
             try:
                 cloud.save_fecha(class_id, iso, False)
+            except Exception:
+                traceback.print_exc()
+        if hora:
+            try:
+                cloud.save_hora(class_id, hora)
             except Exception:
                 traceback.print_exc()
         ACTIVE.add(class_id)
@@ -1092,6 +1147,10 @@ def watch_cloud() -> None:
         traceback.print_exc()
     try:
         completar_fechas()
+    except Exception:
+        traceback.print_exc()
+    try:
+        completar_horas()
     except Exception:
         traceback.print_exc()
     try:
@@ -1152,6 +1211,7 @@ def create_class(source: Path, materia: str, terms: str, reuse: bool = False, cu
         meta["fecha"] = iso
         meta["fecha_origen"] = origin
         meta["fecha_custom"] = False
+    anotar_hora(meta, media, filename=media.name, usar_mtime=True)
     meta["fuentes"] = claves
     write_meta(class_id, meta)
     print(f"[ClaseClara] empieza {class_id} {media.name}", flush=True)
@@ -1166,13 +1226,15 @@ def rename_class(class_id: str, title: str, materia: str) -> dict:
         raise engine.AppError("Escribe un nombre.")
     meta = read_meta(class_id)
     custom = bool(meta.get("title_custom")) or cleaned != (meta.get("title") or "").strip()
-    updated = update_meta(
-        class_id,
-        title=cleaned,
-        materia=" ".join(materia.split())[:120],
-        title_custom=custom,
-        materia_custom=True,
-    )
+    changes = {
+        "title": cleaned,
+        "materia": " ".join(materia.split())[:120],
+        "title_custom": custom,
+        "materia_custom": True,
+    }
+    if custom:
+        changes["titulo_en"] = int(datetime.now().timestamp())
+    updated = update_meta(class_id, **changes)
     study_path = class_dir(class_id) / "study.json"
     study = read_json(study_path, None)
     if isinstance(study, dict):
@@ -1610,6 +1672,12 @@ class Handler(BaseHTTPRequestHandler):
                 meta["fecha"] = iso
                 meta["fecha_origen"] = origin
                 meta["fecha_custom"] = False
+            anotar_hora(
+                meta,
+                saved,
+                filename=str(fields.get("_filename") or saved.name),
+                usar_mtime=False,
+            )
             meta["fuentes"] = claves
             write_meta(class_id, meta)
             launch(class_id)

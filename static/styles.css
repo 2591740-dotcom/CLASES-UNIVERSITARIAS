@@ -221,27 +221,86 @@ main { width: min(1120px, calc(100% - 32px)); margin: 24px auto 48px; }
 
 .picked { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 
-.card-date {
+.list-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
+  gap: 12px;
+  margin: 18px 0 12px;
 }
 
-.card-date,
-.card-date input { cursor: pointer; user-select: auto; -webkit-user-select: auto; }
+.list-head h2 { margin: 0; }
 
-.card-date input[type="date"] {
-  width: auto;
+.list-head .ghost {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .list-head { align-items: flex-start; flex-wrap: wrap; }
+  .list-head h2 { flex: 1 1 100%; }
+}
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.card-marks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.card-when {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.card-when,
+.card-when input { cursor: pointer; user-select: auto; -webkit-user-select: auto; }
+
+.card-when input[type="date"] {
+  width: 10.5rem;
+  max-width: 46vw;
   margin: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.card-when input[type="date"]:hover,
+.card-when input[type="date"]:focus {
+  border-color: var(--line);
+  background: #fff;
+}
+
+.card-hora {
+  width: 10.5rem;
+  max-width: 46vw;
+  padding-right: 26px;
+  box-sizing: border-box;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-align: right;
 }
 
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
@@ -1026,11 +1085,17 @@ html[data-fondo="oscuro"] .fuente.dim button {
   border-color: #2a2a2a;
 }
 
-html[data-fondo="oscuro"] .card-date input[type="date"] {
-  background: #141414;
+html[data-fondo="oscuro"] .card-when input[type="date"] {
+  background: transparent;
   color: var(--ink);
-  border-color: var(--line);
+  border-color: transparent;
   color-scheme: dark;
+}
+
+html[data-fondo="oscuro"] .card-when input[type="date"]:hover,
+html[data-fondo="oscuro"] .card-when input[type="date"]:focus {
+  background: #141414;
+  border-color: var(--line);
 }
 
 html[data-fondo="oscuro"] .drop { border-color: #3a3a3a; }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -78,6 +79,49 @@ def download(url: str, dest: Path) -> None:
         raise engine.AppError("Ese enlace no entregó el video. Tiene que abrir la grabación sin clave.")
 
 
+def _marca(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def elegir_titulo(
+    local_title: str,
+    local_custom: bool,
+    local_at: object,
+    study_title: str,
+    remote_title: str,
+    remote_custom: bool,
+    remote_at: object,
+) -> tuple[str, bool, int]:
+    """Elige el nombre que se queda. Si los dos se editaron, gana el más reciente."""
+    local = " ".join(str(local_title or "").split())[:140]
+    remote = " ".join(str(remote_title or "").split())[:140]
+    study = " ".join(str(study_title or "").split())[:140]
+    local_mark = _marca(local_at)
+    remote_mark = _marca(remote_at)
+    if remote_custom and remote and (not local_custom or remote_mark > local_mark):
+        return remote, True, remote_mark
+    if local_custom and local:
+        return local, True, local_mark
+    return (study or local or remote or "Clase"), False, 0
+
+
+def _titulo_remoto(row: dict) -> tuple[str, bool, int]:
+    estudio = row.get("estudio") if isinstance(row.get("estudio"), dict) else {}
+    columna = " ".join(str(row.get("titulo") or "").split())[:140]
+    guardado = " ".join(str(estudio.get("titulo") or "").split())[:140]
+    if estudio.get("titulo_custom") and (guardado or columna):
+        return (guardado or columna), True, _marca(estudio.get("titulo_en"))
+    if columna and guardado and columna != guardado:
+        return columna, True, 0
+    return "", False, 0
+
+
 def publish(class_id: str) -> None:
     if not configured() or not _valid_id(class_id):
         return
@@ -116,25 +160,71 @@ def publish(class_id: str) -> None:
     curso = _curso_id(meta.get("curso_id") or "")
     remote_url = ""
     remote_estudio: dict = {}
+    remote_title = ""
+    remote_custom = False
+    remote_at = 0
     remote = _request(
         "GET",
-        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=video_url,estudio",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=video_url,titulo,estudio",
     )
     if isinstance(remote, list) and remote:
         remote_url = str(remote[0].get("video_url") or "")
         if isinstance(remote[0].get("estudio"), dict):
             remote_estudio = remote[0]["estudio"]
+        remote_title, remote_custom, remote_at = _titulo_remoto(remote[0])
     remote_fecha = engine.fecha_iso(str(remote_estudio.get("fecha_clase") or ""))
     if remote_estudio.get("fecha_custom") and remote_fecha and not meta.get("fecha_custom"):
         meta["fecha"] = remote_fecha
         meta["fecha_custom"] = True
         meta["fecha_origen"] = "edit"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    chosen, chosen_custom, chosen_at = elegir_titulo(
+        str(meta.get("title") or ""),
+        bool(meta.get("title_custom")),
+        meta.get("titulo_en"),
+        str(study.get("titulo") or ""),
+        remote_title,
+        remote_custom,
+        remote_at,
+    )
+    if chosen_custom and chosen_at <= 0:
+        chosen_at = int(time.time())
+    meta_changed = False
+    if (meta.get("title") or "") != chosen or bool(meta.get("title_custom")) != chosen_custom:
+        meta["title"] = chosen
+        meta["title_custom"] = chosen_custom
+        meta_changed = True
+    if chosen_custom and _marca(meta.get("titulo_en")) != chosen_at:
+        meta["titulo_en"] = chosen_at
+        meta_changed = True
+    if not chosen_custom and "titulo_en" in meta:
+        meta.pop("titulo_en", None)
+        meta_changed = True
+    if meta_changed:
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    study_path = folder / "study.json"
+    if study.get("titulo") != chosen and study_path.is_file():
+        study["titulo"] = chosen
+        study_path.write_text(json.dumps(study, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif study.get("titulo") != chosen:
+        study["titulo"] = chosen
     estudio = dict(study)
     fecha = engine.fecha_iso(str(meta.get("fecha") or ""))
     if fecha:
         estudio["fecha_clase"] = fecha
         estudio["fecha_custom"] = bool(meta.get("fecha_custom"))
+    hora = engine.hora_valida(str(meta.get("hora") or ""))
+    if not hora:
+        hora = engine.hora_valida(str(remote_estudio.get("hora_clase") or ""))
+    if hora:
+        estudio["hora_clase"] = hora
+    estudio["titulo"] = chosen
+    if chosen_custom:
+        estudio["titulo_custom"] = True
+        estudio["titulo_en"] = chosen_at
+    else:
+        estudio.pop("titulo_custom", None)
+        estudio.pop("titulo_en", None)
     remote_fuentes = remote_estudio.get("fuentes") if isinstance(remote_estudio.get("fuentes"), list) else []
     claves = fuentes_de_meta(meta)
     publicas = limpiar_fuentes([*claves, *remote_fuentes], publicas=True)
@@ -147,7 +237,7 @@ def publish(class_id: str) -> None:
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     row = {
         "id": class_id,
-        "titulo": (study.get("titulo") or meta.get("title") or "Clase")[:140],
+        "titulo": chosen[:140],
         "materia": (meta.get("materia") or "")[:120],
         "video_url": "",
         "duracion": float(meta.get("duration") or 0),
@@ -679,6 +769,28 @@ def save_fecha(class_id: str, fecha: str, custom: bool) -> None:
     )
 
 
+def save_hora(class_id: str, hora: str) -> None:
+    clock = engine.hora_valida(hora)
+    if not configured() or not _valid_id(class_id) or not clock:
+        return
+    remote = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=estudio",
+    )
+    estudio: dict = {}
+    if isinstance(remote, list) and remote and isinstance(remote[0].get("estudio"), dict):
+        estudio = dict(remote[0]["estudio"])
+    if engine.hora_valida(str(estudio.get("hora_clase") or "")) == clock:
+        return
+    estudio["hora_clase"] = clock
+    _request(
+        "PATCH",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}",
+        {"estudio": estudio},
+        prefer="return=minimal",
+    )
+
+
 def mark(class_id: str, estado: str, detalle: str) -> None:
     if not configured() or not _valid_id(class_id):
         return
@@ -969,3 +1081,14 @@ def self_test() -> None:
     assert again and again["tipo"] == "video"
     assert "este video" in aviso_duplicado(again["titulo"], again["tipo"])
     assert fila_duplicada(videos, [fuente_archivo("otro.mp4", 5000)]) is None
+    assert elegir_titulo("Auto", False, 0, "Auto", "Editado", True, 10) == ("Editado", True, 10)
+    assert elegir_titulo("Mio", True, 20, "Auto", "Editado", True, 10) == ("Mio", True, 20)
+    assert elegir_titulo("Mio", True, 5, "Auto", "Editado", True, 10) == ("Editado", True, 10)
+    assert elegir_titulo("Mio", True, 0, "Auto", "Otro", False, 0) == ("Mio", True, 0)
+    assert elegir_titulo("Archivo", False, 0, "Del modelo", "Archivo", False, 0) == ("Del modelo", False, 0)
+    assert elegir_titulo("Mio", True, 10, "Auto", "", True, 30) == ("Mio", True, 10)
+    assert _titulo_remoto({"titulo": "En la tarjeta", "estudio": {"titulo": "Del modelo"}}) == ("En la tarjeta", True, 0)
+    assert _titulo_remoto({
+        "titulo": "Viejo",
+        "estudio": {"titulo": "Nuevo", "titulo_custom": True, "titulo_en": 40},
+    }) == ("Nuevo", True, 40)

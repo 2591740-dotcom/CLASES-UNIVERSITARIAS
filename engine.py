@@ -15,7 +15,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MODEL = "grok-4.7"
@@ -281,26 +281,66 @@ def fecha_iso(value: str) -> str:
     return ""
 
 
-def fecha_desde_reloj(value: str) -> str:
+_RELOJ_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?)?"
+)
+
+
+def _partir_reloj(value: str) -> tuple[str, datetime | None]:
+    """modo: vacio, fecha, hora, zona o mal. zona conserva el reloj sin convertir."""
     text = str(value or "").strip()
-    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?)?", text)
+    match = _RELOJ_RE.match(text)
     if not match:
-        return ""
+        return "vacio", None
     year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
     if match.group(4) is None:
-        return _fecha_valida(year, month, day)
+        try:
+            return "fecha", datetime(year, month, day)
+        except ValueError:
+            return "mal", None
     try:
         when = datetime(year, month, day, int(match.group(4)), int(match.group(5)), int(match.group(6)))
     except ValueError:
-        return ""
+        return "mal", None
     zone = match.group(7) or ""
-    if zone:
-        raw = f"{when.strftime('%Y-%m-%dT%H:%M:%S')}{zone.replace('Z', '+00:00')}"
-        try:
-            aware = datetime.fromisoformat(raw)
-        except ValueError:
-            return _fecha_valida(year, month, day)
-        when = aware.astimezone().replace(tzinfo=None)
+    if not zone:
+        return "hora", when
+    raw = f"{when.strftime('%Y-%m-%dT%H:%M:%S')}{zone.replace('Z', '+00:00')}"
+    try:
+        aware = datetime.fromisoformat(raw)
+    except ValueError:
+        return "zona", when
+    return "hora", aware.astimezone().replace(tzinfo=None)
+
+
+def reloj_local(value: str) -> datetime | None:
+    """Fecha y hora locales cuando el texto trae un reloj. Sin hora, None."""
+    modo, when = _partir_reloj(value)
+    if modo != "hora" or when is None:
+        return None
+    if not _fecha_valida(when.year, when.month, when.day):
+        return None
+    return when
+
+
+def hora_valida(value: str) -> str:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(value or "").strip())
+    if not match:
+        return ""
+    return f"{match.group(1)}:{match.group(2)}"
+
+
+def hora_de_reloj(value: str) -> str:
+    when = reloj_local(value)
+    if when is None:
+        return ""
+    return when.strftime("%H:%M")
+
+
+def fecha_desde_reloj(value: str) -> str:
+    modo, when = _partir_reloj(value)
+    if when is None or modo in {"vacio", "mal"}:
+        return ""
     return _fecha_valida(when.year, when.month, when.day)
 
 
@@ -331,7 +371,7 @@ def date_in_text(text: str) -> str:
     return _fecha_valida(year, day, month)
 
 
-def media_created(path: Path) -> str:
+def _marca_creacion(path: Path) -> str:
     if not path.is_file() or shutil.which("ffprobe") is None:
         return ""
     try:
@@ -367,10 +407,18 @@ def media_created(path: Path) -> str:
         for key in wanted:
             if key not in folded:
                 continue
-            found = fecha_desde_reloj(str(folded[key] or ""))
-            if found:
-                return found
+            stamp = str(folded[key] or "").strip()
+            if stamp:
+                return stamp
     return ""
+
+
+def media_created(path: Path) -> str:
+    return fecha_desde_reloj(_marca_creacion(path))
+
+
+def media_hora(path: Path) -> str:
+    return hora_de_reloj(_marca_creacion(path))
 
 
 def file_day(path: Path) -> str:
@@ -410,6 +458,63 @@ def fecha_de_video(path: Path, filename: str = "", hint: str = "", usar_mtime: b
         if day:
             return day, "mtime"
     return "", ""
+
+
+def hora_en_nombre(text: str) -> str:
+    """Hora local de un nombre Zoom GMT/UTC. Un sello sin esa marca no vale."""
+    raw = str(text or "")
+    match = re.search(
+        r"(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)[-_ ]([0-2]\d)([0-5]\d)([0-5]\d)",
+        raw,
+        re.I,
+    )
+    if not match:
+        return ""
+    try:
+        when = datetime(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            int(match.group(5)),
+            int(match.group(6)),
+            tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return ""
+    local = when.astimezone().replace(tzinfo=None)
+    if not _fecha_valida(local.year, local.month, local.day):
+        return ""
+    return local.strftime("%H:%M")
+
+
+def hora_de_video(path: Path, filename: str = "", usar_mtime: bool = True) -> str:
+    """Hora de la clase: reloj del video, si no el nombre GMT, y al final la del archivo."""
+    target = path
+    if path.is_dir():
+        videos = sorted(path.glob("video*.mp4"))
+        if videos:
+            target = videos[0]
+    if target.is_file():
+        embedded = media_hora(target)
+        if embedded:
+            return embedded
+    names = [filename, target.name if str(target) else "", path.name]
+    parent = target.parent.name if str(target.parent) else ""
+    if parent:
+        names.append(parent)
+    for text in names:
+        found = hora_en_nombre(text)
+        if found:
+            return found
+    if usar_mtime and target.is_file() and target.name.lower() != "fuente.mp4":
+        try:
+            stamp = datetime.fromtimestamp(target.stat().st_mtime)
+        except OSError:
+            return ""
+        if _fecha_valida(stamp.year, stamp.month, stamp.day):
+            return stamp.strftime("%H:%M")
+    return ""
 
 
 def fmt_time(seconds: float) -> str:
@@ -3192,6 +3297,15 @@ def self_test() -> None:
     assert fecha_iso("1999-01-01") == ""
     assert fecha_iso("no es una fecha") == ""
     assert fecha_desde_reloj("2026-10-30T20:04:22.000000Z")
+    assert hora_de_reloj("2026-10-30T20:04:22") == "20:04"
+    assert hora_de_reloj("2026-10-30") == ""
+    assert hora_valida("20:04") == "20:04"
+    assert hora_valida("24:00") == ""
+    assert hora_valida("7:04") == ""
+    assert hora_en_nombre("20261030 183000") == ""
+    assert hora_en_nombre("GMT20261030-183000_Recording.mp4") == datetime(
+        2026, 10, 30, 18, 30, tzinfo=timezone.utc,
+    ).astimezone().strftime("%H:%M")
     assert fmt_time(0) == "0:00"
     assert fmt_time(65) == "1:05"
     assert fmt_time(3661) == "1:01:01"
