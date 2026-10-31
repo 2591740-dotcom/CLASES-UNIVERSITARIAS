@@ -1554,8 +1554,8 @@ function startSpeech() {
     return;
   }
   listenNote("");
-  pauseClassVideo();
   ignoreVideoPlayUntil = Date.now() + 1600;
+  pauseClassVideo();
   speechToggleAt = now;
   if (reader) {
     startPhoneSpeech(reader, chunks);
@@ -1816,9 +1816,17 @@ function bindMiniPlayer() {
     const top = mark.getBoundingClientRect().top;
     const next = miniPlayerNext(slot.classList.contains("mini"), top, header);
     mark.style.height = next ? `${slot.dataset.fullHeight || 0}px` : "";
+    const wasMini = slot.classList.contains("mini");
     slot.classList.toggle("mini", next);
     if (next) applyMiniPlace(slot);
-    else clearMiniOffset(slot);
+    else {
+      if (wasMini) {
+        slot.classList.remove("video-hidden");
+        syncHideButton(slot);
+        miniShownPlace = null;
+      }
+      clearMiniOffset(slot);
+    }
   };
   const schedule = () => {
     if (miniFrame) return;
@@ -1957,7 +1965,7 @@ function mountYouTube(node) {
           event.target.playVideo();
         },
         onStateChange: (event) => {
-          if (event.data === 1) stopSpeech();
+          if (event.data === 1 && Date.now() >= ignoreVideoPlayUntil) stopSpeech();
         },
         onError: () => {
           const slot = document.querySelector(".player-slot");
@@ -2039,6 +2047,16 @@ async function ask(question) {
   }
 }
 
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".player-hide");
+  if (!button || !phoneApp()) return;
+  const slot = button.closest(".player-slot.mini");
+  if (!slot) return;
+  event.preventDefault();
+  event.stopPropagation();
+  toggleMiniVideo(slot);
+});
+
 document.querySelector(".brand").addEventListener("click", (event) => {
   event.preventDefault();
   goHome();
@@ -2054,4 +2072,5 @@ function startClaseClara() {
   });
 }
 
-window.startClaseClara 
+window.startClaseClara = startClaseClara;
+if (!window.CLASECLARA_HOLD) startClaseClara();
