@@ -558,26 +558,9 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 }
 
 .class-tools {
-  position: fixed;
-  top: var(--head-h, 0px);
-  left: 0;
-  right: 0;
-  z-index: 5;
   display: flex;
   gap: 8px;
-  box-sizing: border-box;
-  padding: 8px 16px 8px max(16px, calc((100% - 1120px) / 2));
-  background: rgba(255, 250, 243, 0.96);
-  border-bottom: 1px solid var(--line);
-}
-
-.class-tools-pad { height: var(--tools-h, 52px); }
-
-#app:has(.class-tools) { margin-top: 0; }
-
-#app:has(.class-tools) .chat {
-  top: calc(var(--head-h, 72px) + var(--tools-h, 52px) + 8px);
-  height: calc(100vh - var(--head-h, 72px) - var(--tools-h, 52px) - 20px);
+  padding: 8px 0;
 }
 
 .layout > * { min-width: 0; }
@@ -913,7 +896,6 @@ body.seeing-frame { overflow: hidden; }
     white-space: normal;
   }
   .shot img { height: auto; max-height: 160px; }
-  .class-tools { padding-left: 8px; padding-right: 8px; }
   #find-avisos { padding: 6px 12px; font-size: 14px; }
 }
 
@@ -940,9 +922,8 @@ html[data-fondo="oscuro"] body {
     var(--paper);
 }
 
-html[data-fondo="oscuro"] .top,
-html[data-fondo="oscuro"] .class-tools {
-  background: rgba(14, 14, 14, 0.96);
+html[data-fondo="oscuro"] .top {
+  background: rgba(14, 14, 14, 0.94);
 }
 
 html[data-fondo="oscuro"] #config:not([hidden]) {
@@ -1197,7 +1178,7 @@ html[data-fondo="oscuro"] .capsule-edit {
 }
 
 @media print {
-  .top, .class-tools, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal { display: none !important; }
+  .top, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal { display: none !important; }
   .layout { display: block; }
   html[data-fondo="oscuro"] body,
   body { background: #fff; color: #111; }

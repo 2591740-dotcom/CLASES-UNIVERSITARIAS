@@ -395,20 +395,7 @@ function renderChrome() {
   if (configBtn) configBtn.onclick = openConfig;
   const salirBtn = document.querySelector("#salir-cuenta");
   if (salirBtn) salirBtn.onclick = salirCuenta;
-  placeClassTools();
 }
-
-function placeClassTools() {
-  const tools = document.querySelector(".class-tools");
-  const head = document.querySelector(".top");
-  if (!tools || !head) return;
-  const headH = Math.ceil(head.getBoundingClientRect().height);
-  const toolsH = Math.ceil(tools.getBoundingClientRect().height);
-  document.documentElement.style.setProperty("--head-h", headH + "px");
-  document.documentElement.style.setProperty("--tools-h", toolsH + "px");
-}
-
-window.addEventListener("resize", () => placeClassTools());
 
 function renderKey(status) {
   setup = status || {};
@@ -1940,7 +1927,6 @@ function studyHtml(data) {
       <button class="ghost" id="back" type="button">Inicio</button>
       <button class="ghost danger" id="delete" type="button">Borrar</button>
     </div>
-    <div class="class-tools-pad"></div>
     <div class="layout">
       <section>
         <div class="study-head">
@@ -2937,7 +2923,6 @@ function abrirAvisos() {
 }
 
 function bindStudy() {
-  placeClassTools();
   document.querySelector("#back").onclick = goHome;
   const cursoClase = document.querySelector("#clase-curso");
   if (cursoClase) {
