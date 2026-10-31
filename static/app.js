@@ -651,8 +651,9 @@ function homeHtml(classes, status, cursos) {
       return (item.curso_id || primero) === pack.activo;
     })
     : list;
-  const mine = visibles.length
-    ? visibles.map(cardHtml).join("")
+  const ordenadas = ordenarClases(visibles, leerOrdenLocal(pack.activo || "pc"));
+  const mine = ordenadas.length
+    ? ordenadas.map(cardHtml).join("")
     : pack.nombre
       ? `<p class="empty">Todavía no hay clases en ${esc(pack.nombre)}.</p>`
       : '<p class="empty">Todavía no hay clases. La primera aparece aquí.</p>';
@@ -679,13 +680,52 @@ function homeHtml(classes, status, cursos) {
     <div class="grid">${mine}</div>`;
 }
 
+function ordenarClases(list, ids) {
+  const rank = new Map();
+  (Array.isArray(ids) ? ids : []).forEach((id, index) => {
+    if (typeof id === "string" && !rank.has(id)) rank.set(id, index);
+  });
+  const known = [];
+  const fresh = [];
+  (Array.isArray(list) ? list : []).forEach((item) => {
+    if (item && rank.has(item.id)) known.push(item);
+    else fresh.push(item);
+  });
+  known.sort((a, b) => rank.get(a.id) - rank.get(b.id));
+  return fresh.concat(known);
+}
+
+function leerOrdenLocal(cursoId) {
+  try {
+    const all = JSON.parse(localStorage.getItem("cc-orden") || "{}");
+    return all && Array.isArray(all[cursoId]) ? all[cursoId] : [];
+  } catch {
+    return [];
+  }
+}
+
+function guardarOrdenLocal(cursoId, ids) {
+  let all = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem("cc-orden") || "{}");
+    if (parsed && typeof parsed === "object") all = parsed;
+  } catch { /* se guarda de nuevo */ }
+  all[cursoId || "pc"] = ids;
+  localStorage.setItem("cc-orden", JSON.stringify(all));
+}
+
 function cardHtml(item) {
   const state = item.status === "ready" ? "Lista" : item.status === "error" ? "Se detuvo" : "Preparando";
   const extra = item.status === "error" ? item.error : item.status === "ready" ? durationLabel(item.duration) : item.detail;
   const avisos = Number(item.avisos) || 0;
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
   return `
-    <article class="card">
+    <article class="card" data-id="${esc(item.id)}">
+      <div class="card-move">
+        <button class="card-grip" type="button">Arrastrar</button>
+        <button class="ghost move-up" type="button">Subir</button>
+        <button class="ghost move-down" type="button">Bajar</button>
+      </div>
       <span class="status ${esc(item.status)}">${esc(state)}</span>
       ${flag}
       <h3>${esc(item.title || "Clase")}</h3>
@@ -1074,6 +1114,7 @@ async function showHome() {
   document.querySelectorAll(".delete-class").forEach((button) => {
     button.onclick = () => removeClass(button.dataset.id);
   });
+  bindOrder();
   const drop = document.querySelector("#drop");
   const fileInput = document.querySelector("#file");
   if (drop && fileInput) {
@@ -1100,6 +1141,110 @@ async function showHome() {
     drop.classList.remove("over");
     const file = event.dataTransfer.files && event.dataTransfer.files[0];
     if (file) uploadFile(file);
+  });
+}
+
+function pintarLimites(grid) {
+  const items = [...grid.querySelectorAll(".card")];
+  items.forEach((card, index) => {
+    const up = card.querySelector(".move-up");
+    const down = card.querySelector(".move-down");
+    if (up) up.disabled = index === 0;
+    if (down) down.disabled = index === items.length - 1;
+  });
+}
+
+function idsDelGrid(grid) {
+  return [...grid.querySelectorAll(".card")]
+    .map((card) => card.dataset.id)
+    .filter((id) => /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(id || ""));
+}
+
+async function guardarOrdenVisible(grid) {
+  const ids = idsDelGrid(grid);
+  try {
+    if (window.claseClaraCloud) {
+      await api("/api/classes/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      return;
+    }
+    const pack = window.CLASECLARA_CURSOS;
+    guardarOrdenLocal(pack && pack.activo ? pack.activo : "pc", ids);
+  } catch (error) {
+    alert(error.message);
+    showHome();
+  }
+}
+
+function moverTarjeta(card, delta) {
+  const grid = card && card.parentElement;
+  if (!grid) return;
+  const items = [...grid.querySelectorAll(".card")];
+  const index = items.indexOf(card);
+  const next = index + delta;
+  if (index < 0 || next < 0 || next >= items.length) return;
+  const other = items[next];
+  if (delta < 0) grid.insertBefore(card, other);
+  else grid.insertBefore(other, card);
+  pintarLimites(grid);
+  guardarOrdenVisible(grid);
+}
+
+function empezarMover(event, card, grid) {
+  if (event.button != null && event.button !== 0) return;
+  event.preventDefault();
+  card.classList.add("dragging");
+  try { card.setPointerCapture(event.pointerId); } catch { /* el arrastre sigue aunque el dedo salga de la tarjeta */ }
+  const move = (ev) => {
+    if (ev.cancelable) ev.preventDefault();
+    const edge = 72;
+    if (ev.clientY > window.innerHeight - edge) window.scrollBy(0, 28);
+    else if (ev.clientY < edge) window.scrollBy(0, -28);
+    const x = Math.max(8, Math.min(window.innerWidth - 8, ev.clientX));
+    const y = Math.max(8, Math.min(window.innerHeight - 8, ev.clientY));
+    const under = document.elementFromPoint(x, y);
+    const target = under && under.closest ? under.closest(".card") : null;
+    if (!target || target === card || target.parentElement !== grid) return;
+    const cards = [...grid.querySelectorAll(".card")];
+    const from = cards.indexOf(card);
+    const to = cards.indexOf(target);
+    if (from < 0 || to < 0 || from === to) return;
+    if (from < to) grid.insertBefore(card, target.nextElementSibling);
+    else grid.insertBefore(card, target);
+    pintarLimites(grid);
+  };
+  const end = () => {
+    card.classList.remove("dragging");
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", end);
+    window.removeEventListener("pointercancel", end);
+    guardarOrdenVisible(grid);
+  };
+  window.addEventListener("pointermove", move, { passive: false });
+  window.addEventListener("pointerup", end);
+  window.addEventListener("pointercancel", end);
+}
+
+function bindOrder() {
+  const grid = document.querySelector(".grid");
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll(".card")];
+  if (cards.length < 2) {
+    grid.querySelectorAll(".card-move").forEach((row) => { row.hidden = true; });
+    return;
+  }
+  pintarLimites(grid);
+  grid.querySelectorAll(".move-up").forEach((button) => {
+    button.onclick = () => moverTarjeta(button.closest(".card"), -1);
+  });
+  grid.querySelectorAll(".move-down").forEach((button) => {
+    button.onclick = () => moverTarjeta(button.closest(".card"), 1);
+  });
+  grid.querySelectorAll(".card-grip").forEach((grip) => {
+    grip.addEventListener("pointerdown", (event) => empezarMover(event, grip.closest(".card"), grid));
   });
 }
 

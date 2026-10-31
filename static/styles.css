@@ -251,6 +251,25 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 
 .card .actions { display: flex; gap: 8px; margin-top: 8px; }
 
+.card-move { display: flex; gap: 6px; align-items: center; }
+
+.card-grip {
+  flex: 1;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-size: 13px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.card-move .ghost { padding: 6px 10px; font-size: 13px; }
+.card-move .ghost:disabled { opacity: 0.35; }
+.card.dragging { opacity: 0.55; pointer-events: none; }
+
 .status {
   font-size: 12px;
   letter-spacing: 0.04em;
@@ -951,6 +970,12 @@ html[data-fondo="oscuro"] .fondo .texty.on {
 html[data-fondo="oscuro"] .banner {
   background: #2a2118;
   border-color: #5c4632;
+}
+
+html[data-fondo="oscuro"] .card-grip {
+  background: #141414;
+  color: #f7f4ee;
+  border-color: #2e2e2e;
 }
 
 html[data-fondo="oscuro"] .drop { border-color: #3a3a3a; }

@@ -805,7 +805,12 @@
         && row.carrera === estudio.carrera
         && row.curso_id === pack.activo
       ));
-      return { classes: list.map(card), cursos: pack };
+      const orden = await loadOrden();
+      return { classes: ordenarClases(list.map(card), orden[pack.activo]), cursos: pack };
+    }
+    if (url === "/api/classes/order" && method === "POST") {
+      const body = JSON.parse((options && options.body) || "{}");
+      return saveOrden(body.ids);
     }
     if (url === "/api/classes" && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
@@ -880,6 +885,58 @@
 
   function esIdCurso(id) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ""));
+  }
+
+  function esIdClase(id) {
+    return /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(String(id || ""));
+  }
+
+  function ordenarClases(list, ids) {
+    const rank = new Map();
+    (Array.isArray(ids) ? ids : []).forEach((id, index) => {
+      if (esIdClase(id) && !rank.has(id)) rank.set(id, index);
+    });
+    const known = [];
+    const fresh = [];
+    (Array.isArray(list) ? list : []).forEach((item) => {
+      if (item && rank.has(item.id)) known.push(item);
+      else fresh.push(item);
+    });
+    known.sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    return fresh.concat(known);
+  }
+
+  async function loadOrden() {
+    try {
+      await session();
+      const response = await fetch(`${cfg.url}/storage/v1/object/diapositivas/ajustes/orden.json?t=${Date.now()}`, {
+        cache: "no-store",
+        headers: { apikey: cfg.anon, Authorization: `Bearer ${access}` },
+      });
+      if (!response.ok) return {};
+      const data = await response.json().catch(() => null);
+      return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    } catch {
+      return {};
+    }
+  }
+
+  async function saveOrden(ids) {
+    const curso = window.CLASECLARA_CURSOS && window.CLASECLARA_CURSOS.activo;
+    if (!esIdCurso(curso)) throw new Error("Elige un curso antes de ordenar las clases.");
+    const clean = [];
+    const seen = new Set();
+    (Array.isArray(ids) ? ids : []).forEach((id) => {
+      const text = String(id || "");
+      if (!esIdClase(text) || seen.has(text) || clean.length >= 200) return;
+      seen.add(text);
+      clean.push(text);
+    });
+    const all = await loadOrden();
+    all[curso] = clean;
+    const blob = new Blob([JSON.stringify(all)], { type: "application/octet-stream" });
+    await putPart("ajustes/orden.json", blob, "No pude guardar el orden de las clases.");
+    return { ok: true };
   }
 
   function estudioLlave() {
