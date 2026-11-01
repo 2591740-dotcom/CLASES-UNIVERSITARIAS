@@ -266,40 +266,47 @@ main { width: min(1120px, calc(100% - 32px)); margin: 24px auto 48px; }
   gap: 2px;
   flex: 0 0 auto;
   margin-left: auto;
+  min-width: 7.2rem;
+  position: relative;
 }
 
 .card-when,
-.card-when input { cursor: pointer; user-select: auto; -webkit-user-select: auto; }
+.fecha-vista { cursor: pointer; user-select: auto; -webkit-user-select: auto; }
 
-.card-when input[type="date"] {
-  width: 10.5rem;
-  max-width: 46vw;
+.fecha-vista {
+  appearance: none;
+  -webkit-appearance: none;
   margin: 0;
-  padding: 2px 6px;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  padding: 0;
+  border: 0;
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
+  line-height: 1.2;
   text-align: right;
 }
 
-.card-when input[type="date"]:hover,
-.card-when input[type="date"]:focus {
-  border-color: var(--line);
-  background: #fff;
+.card-when input[type="date"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .card-hora {
-  width: 10.5rem;
-  max-width: 46vw;
-  padding-right: 26px;
-  box-sizing: border-box;
-  font-size: 13px;
+  margin: 0;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 650;
   line-height: 1.2;
-  color: var(--muted);
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
   text-align: right;
@@ -1107,6 +1114,11 @@ html[data-fondo="oscuro"] .fuente.dim button {
   background: #101010;
   color: #6a645c;
   border-color: #2a2a2a;
+}
+
+html[data-fondo="oscuro"] .fecha-vista,
+html[data-fondo="oscuro"] .card-hora {
+  color: #f7f4ee;
 }
 
 html[data-fondo="oscuro"] .card-when input[type="date"] {

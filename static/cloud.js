@@ -1647,14 +1647,40 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     if (rows.length) await rest("POST", "/rest/v1/diapositivas", rows);
   }
 
-  async function publicarAqui(id, row, study, transcript, duration) {
+  function horaEnNombre(text) {
+    const match = String(text || "").match(/(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)[-_ ]([0-2]\d)([0-5]\d)([0-5]\d)/i);
+    if (!match) return "";
+    const when = new Date(Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    ));
+    if (Number.isNaN(when.getTime())) return "";
+    return `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+  }
+
+  function horaDeArchivo(file) {
+    const named = horaEnNombre(file && file.name);
+    if (named) return named;
+    const stamp = file && Number(file.lastModified);
+    if (!Number.isFinite(stamp) || stamp < Date.UTC(2000, 0, 1)) return "";
+    const when = new Date(stamp);
+    return `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+  }
+
+  async function publicarAqui(id, row, study, transcript, duration, reloj) {
     const previo = row.estudio && typeof row.estudio === "object" ? row.estudio : {};
     const custom = Boolean(previo.titulo_custom);
     const titulo = (custom ? (previo.titulo || row.titulo) : (study.titulo || row.titulo || "Clase")).slice(0, 140);
     const estudio = { ...study, titulo };
     if (previo.fecha_clase) estudio.fecha_clase = previo.fecha_clase;
+    else if (!previo.fecha_custom && reloj && reloj.fecha) estudio.fecha_clase = reloj.fecha;
     if (previo.fecha_custom) estudio.fecha_custom = true;
     if (previo.hora_clase) estudio.hora_clase = previo.hora_clase;
+    else if (reloj && reloj.hora) estudio.hora_clase = reloj.hora;
     if (Array.isArray(previo.fuentes) && previo.fuentes.length) estudio.fuentes = previo.fuentes;
     if (custom) {
       estudio.titulo_custom = true;
@@ -1669,6 +1695,104 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       estado: "lista",
       detalle: "Listo",
     });
+  }
+
+  const TROZO = 8 * 1024 * 1024;
+
+  function ponerRango(url, blob, start, total) {
+    const end = start + blob.size - 1;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("Content-Type", blob.type || "video/mp4");
+      xhr.setRequestHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText || "" });
+      xhr.onerror = () => reject(new Error("Se cortó la subida a YouTube."));
+      xhr.send(blob);
+    });
+  }
+
+  function enlaceYouTube(data) {
+    let payload = {};
+    try { payload = JSON.parse(data || "{}"); } catch { payload = {}; }
+    const video = String(payload.id || "");
+    if (!/^[A-Za-z0-9_-]{11}$/.test(video)) throw new Error("YouTube no devolvió el video.");
+    return `https://www.youtube.com/watch?v=${video}`;
+  }
+
+  async function abrirYouTube(titulo, bytes, tipo) {
+    await session();
+    const payload = { titulo, bytes, tipo: tipo || "video/mp4" };
+    const destino = "https://clases-universitarias.netlify.app/.netlify/functions/youtube";
+    let data = {};
+    if (native) {
+      const http = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+      if (!http) throw new Error("No pude abrir YouTube.");
+      const result = await http.request({
+        url: destino,
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+        data: payload,
+      });
+      data = result ? result.data : {};
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { data = {}; }
+      }
+      if (!result || Number(result.status) >= 400 || !data.url) {
+        throw new Error((data && data.error) || "YouTube no abrió la subida.");
+      }
+    } else {
+      const response = await fetch("/.netlify/functions/youtube", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+        body: JSON.stringify(payload),
+      });
+      data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.url) throw new Error(data.error || "YouTube no abrió la subida.");
+    }
+    if (!String(data.url).startsWith("https://") || !String(data.url).includes("googleapis.com")) {
+      throw new Error("YouTube no abrió la subida.");
+    }
+    return data.url;
+  }
+
+  async function subirArchivo(file, titulo, onProgress) {
+    const tipo = file.type || "video/mp4";
+    const sesion = await abrirYouTube(titulo, file.size, tipo);
+    let start = 0;
+    while (start < file.size) {
+      const blob = file.slice(start, Math.min(file.size, start + TROZO), tipo);
+      const result = await ponerRango(sesion, blob, start, file.size);
+      if (result.status === 200 || result.status === 201) return enlaceYouTube(result.text);
+      if (result.status !== 308) throw new Error("YouTube no recibió el video.");
+      start += blob.size;
+      if (onProgress) onProgress(`Subiendo a YouTube… ${Math.round(start / file.size * 100)}%`);
+    }
+    throw new Error("La subida a YouTube se cortó.");
+  }
+
+  async function subirZoom(enlace, titulo, onProgress) {
+    const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.ClaseClaraYouTube;
+    if (!plugin || !native) {
+      throw new Error("Desde el navegador no puedo bajar el video de Zoom para YouTube. En la aplicación del celular sí se sube.");
+    }
+    const medida = await plugin.medir({ enlace });
+    const bytes = Number(medida && medida.bytes) || 0;
+    if (bytes < 1000) throw new Error("El enlace no devolvió un video completo.");
+    const sesion = await abrirYouTube(titulo, bytes, (medida && medida.tipo) || "video/mp4");
+    const aviso = await plugin.addListener("progreso", (data) => {
+      if (onProgress && data && data.detalle) onProgress(data.detalle);
+    });
+    try {
+      const result = await plugin.subir({ enlace, sesion, bytes });
+      const watch = String((result && result.watch) || "");
+      if (!watch.startsWith("https://www.youtube.com/watch?v=")) {
+        throw new Error("YouTube no devolvió el video.");
+      }
+      return { watch, nombre: String((medida && medida.nombre) || "") };
+    } finally {
+      if (aviso && aviso.remove) aviso.remove();
+    }
   }
 
   async function prepararEnEsteAparato(id, extra) {
@@ -1698,6 +1822,35 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       const crudo = (extra && extra.link) || (!saved && row.video_url) || "";
       const zoom = /zoom\.us/i.test(crudo) ? playback(crudo) : "";
       if (!saved && !zoom) throw new Error("Vuelve a elegir el video o pega el enlace otra vez.");
+      const yaYouTube = typeof youtubeHref === "function" && youtubeHref(row.video_url);
+      let avisoYouTube = "";
+      let reloj = {
+        hora: saved ? horaDeArchivo(saved) : "",
+        fecha: saved && typeof fechaDelArchivo === "function" ? fechaDelArchivo(saved) : "",
+      };
+      const subida = yaYouTube
+        ? Promise.resolve("")
+        : (saved
+          ? subirArchivo(saved, row.titulo || "Clase", (detalle) => { say(detalle); }).then((watch) => watch)
+          : subirZoom(zoom, row.titulo || "Clase", (detalle) => { say(detalle); }).then((result) => {
+            if (result && result.nombre) {
+              const hora = horaEnNombre(result.nombre);
+              const fecha = typeof fechaEnTexto === "function" ? fechaEnTexto(result.nombre) : "";
+              if (hora) reloj.hora = hora;
+              if (fecha) reloj.fecha = fecha;
+            }
+            return result && result.watch ? result.watch : "";
+          })
+        ).then(async (watch) => {
+          if (!watch) return "";
+          try {
+            await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, { video_url: watch });
+          } catch { avisoYouTube = avisoYouTube || "No pude guardar el enlace de YouTube."; }
+          return watch;
+        }).catch((error) => {
+          avisoYouTube = String((error && error.message) || "No pude subir el video a YouTube.").slice(0, 180);
+          return "";
+        });
       const tomas = saved ? capturarVideo(saved).catch(() => []) : Promise.resolve([]);
       await say(saved ? "Enviando el audio…" : "Transcribiendo lo que se dijo");
       const stt = await transcribirDeepgram({
@@ -1721,11 +1874,25 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       } catch { /* la explicación se guarda igual si una captura no entra */ }
       let fresco = row;
       try { fresco = await one(id); } catch { fresco = row; }
+      const watch = await subida;
+      if (watch) {
+        try {
+          await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, { video_url: watch });
+          fresco = { ...fresco, video_url: watch };
+        } catch { avisoYouTube = avisoYouTube || "No pude guardar el enlace de YouTube."; }
+      }
       await publicarAqui(id, fresco, study, {
         text: stt.text || textoDeLineas(lines),
         language: "es",
         lines,
-      }, duration);
+      }, duration, reloj);
+      if (!watch && avisoYouTube) {
+        try {
+          await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, {
+            detalle: `Listo. ${avisoYouTube}`.slice(0, 300),
+          });
+        } catch { /* la clase ya quedó lista */ }
+      }
     } catch (error) {
       const message = String((error && error.message) || "No pude preparar la clase en este aparato.").slice(0, 300);
       try {

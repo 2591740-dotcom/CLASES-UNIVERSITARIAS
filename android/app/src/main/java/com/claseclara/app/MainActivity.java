@@ -14,6 +14,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(SpeechPlugin.class);
+        registerPlugin(YouTubePlugin.class);
         super.onCreate(savedInstanceState);
         if (getBridge() == null || getBridge().getWebView() == null) return;
         WebView webView = getBridge().getWebView();

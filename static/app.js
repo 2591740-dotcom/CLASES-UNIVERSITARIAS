@@ -43,6 +43,12 @@ function horaValida(value) {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : "";
 }
 
+function fechaVisible(iso) {
+  const match = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  return `${match[3]}/${match[2]}/${match[1]}`;
+}
+
 function fechaEnTexto(text) {
   const raw = String(text || "");
   const tagged = raw.match(/(?:GMT|UTC)(20\d{2})([01]\d)([0-3]\d)/i);
@@ -947,7 +953,14 @@ function cardHtml(item) {
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
   const fecha = fechaIso(item.fecha);
   const hora = horaValida(item.hora);
+  const dia = fechaVisible(fecha);
   const reloj = hora ? `<span class="card-hora">${esc(hora)}</span>` : "";
+  const aviso = item.status === "ready" && item.detail && item.detail !== "Listo" ? item.detail : "";
+  const linea = item.status === "error"
+    ? item.error
+    : item.status === "ready"
+      ? [durationLabel(item.duration), aviso].filter(Boolean).join(" · ")
+      : item.detail;
   return `
     <article class="card" data-id="${esc(item.id)}" data-fecha="${esc(fecha)}" data-hora="${esc(hora)}">
       <div class="card-top">
@@ -956,12 +969,13 @@ function cardHtml(item) {
           ${flag}
         </div>
         <div class="card-when">
-          <input class="fecha-clase" type="date" data-id="${esc(item.id)}" value="${esc(fecha)}" aria-label="Fecha de la clase">
+          <button class="fecha-vista" type="button">${esc(dia || "Fecha")}</button>
+          <input class="fecha-clase" type="date" data-id="${esc(item.id)}" value="${esc(fecha)}" aria-label="Fecha de la clase" tabindex="-1">
           ${reloj}
         </div>
       </div>
       <h3>${esc(item.title || "Clase")}</h3>
-      ${extra ? `<p>${esc(extra)}</p>` : ""}
+      ${linea ? `<p>${esc(linea)}</p>` : ""}
       <div class="actions">
         <button class="primary open-class" type="button" data-id="${esc(item.id)}">Abrir</button>
         <button class="ghost danger delete-class" type="button" data-id="${esc(item.id)}">Borrar</button>
@@ -1349,6 +1363,20 @@ function pintarInicio(status, list) {
     input.dataset.prev = input.value;
     input.addEventListener("pointerdown", (event) => event.stopPropagation());
     input.addEventListener("change", () => guardarFecha(input));
+    const vista = input.parentElement && input.parentElement.querySelector(".fecha-vista");
+    if (vista) {
+      vista.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        input.style.pointerEvents = "auto";
+        if (typeof input.showPicker === "function") {
+          input.showPicker().catch(() => input.click());
+        } else {
+          input.focus();
+          input.click();
+        }
+      });
+    }
   });
   document.querySelectorAll(".card-when").forEach((box) => {
     box.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -1603,7 +1631,7 @@ function processHtml(job) {
       <ul class="steps" id="steps">${stepsHtml(job)}</ul>
       ${error}
       <p class="note">${window.claseClaraCloud
-        ? "Se prepara en este aparato. Deja esta pantalla abierta. Una clase de una hora puede tardar varios minutos."
+        ? "Se prepara en este aparato y el video se sube a YouTube desde aquí. Deja esta pantalla abierta. Una clase de una hora puede tardar varios minutos."
         : "Una clase de una hora suele tardar unos minutos. Puedes dejar esta página abierta."}</p>
     </section>`;
 }
@@ -1946,6 +1974,8 @@ async function guardarFecha(input) {
     const card = input.closest(".card");
     if (card) {
       card.dataset.fecha = input.value;
+      const vista = card.querySelector(".fecha-vista");
+      if (vista) vista.textContent = fechaVisible(input.value) || "Fecha";
       const hora = horaValida(saved.hora);
       card.dataset.hora = hora;
       const cuando = card.querySelector(".card-when");
@@ -4128,7 +4158,7 @@ async function openClass(id, opciones) {
     if (data.status === "processing") {
       watch(id);
       const detail = String(data.detail || "");
-      const deAqui = /este aparato|transcribiendo|escribiendo la explicación|enviando el audio/i.test(detail);
+      const deAqui = /este aparato|transcribiendo|escribiendo la explicación|enviando el audio|subiendo a youtube/i.test(detail);
       if (deAqui && !(opciones && opciones.espera) && window.claseClaraCloud && window.claseClaraCloud.preparar) {
         window.claseClaraCloud.preparar(id);
       }
