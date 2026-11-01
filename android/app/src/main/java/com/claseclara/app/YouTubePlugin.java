@@ -26,6 +26,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -282,40 +284,197 @@ public class YouTubePlugin extends Plugin {
             String raw = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
             long ms = raw == null ? 0 : Long.parseLong(raw);
             if (ms < 400) return out;
-            String previous = "";
-            for (int index = 0; index < 10 && out.length() < 8; index++) {
-                long at = Math.min(ms - 50, Math.max(200, ms * (index * 2L + 1L) / 20L));
-                Bitmap frame = null;
-                Bitmap scaled = null;
-                try {
-                    frame = retriever.getFrameAtTime(at * 1000L, MediaMetadataRetriever.OPTION_CLOSEST);
-                    if (frame == null) continue;
-                    scaled = escalar(frame);
-                    if (scaled != frame) {
-                        frame.recycle();
-                        frame = null;
-                    }
-                    if (casiNegro(scaled)) continue;
-                    String firma = firmaDe(scaled);
-                    if (firma.length() == 0 || firma.equals(previous)) continue;
-                    String jpeg = jpegDe(scaled);
-                    if (jpeg.length() < 500 || jpeg.length() > 400000) continue;
-                    previous = firma;
-                    JSONObject item = new JSONObject();
-                    item.put("jpeg", jpeg);
-                    item.put("tiempo", Math.round((at / 1000.0) * 100.0) / 100.0);
-                    out.put(item);
-                } catch (Exception ignored) {
-                    /* este cuadro se salta */
-                } finally {
-                    if (frame != null && frame != scaled && !frame.isRecycled()) frame.recycle();
-                    if (scaled != null && !scaled.isRecycled()) scaled.recycle();
+            double duration = ms / 1000.0;
+            double step = pasoDe(duration);
+            double fin = Math.max(0.2, duration - 0.05);
+            double early = Math.min(2.0, duration / 3.0);
+            List<Toma> cambios = new ArrayList<>();
+            int[] anterior = null;
+            Toma temprana = null;
+            int guard = 0;
+            for (double cursor = Math.min(0.3, fin); cursor <= fin + 0.001 && guard < 240; cursor += step) {
+                guard += 1;
+                double at = Math.min(fin, Math.max(0.1, cursor));
+                Muestra muestra = cuadroEn(retriever, at);
+                if (muestra == null) continue;
+                if (temprana == null && at + 0.001 >= Math.min(early, fin)) {
+                    temprana = new Toma(at, muestra.avg, muestra.bits);
                 }
+                if (anterior != null && diferencia(anterior, muestra.vals) < 0.18) {
+                    anterior = muestra.vals;
+                    continue;
+                }
+                cambios.add(new Toma(at, muestra.avg, muestra.bits));
+                anterior = muestra.vals;
+            }
+            if (temprana != null && !cerca(cambios, temprana.time)) cambios.add(0, temprana);
+            List<Toma> elegidas = elegirTomas(cambios);
+            if (elegidas.isEmpty()) {
+                elegidas.add(new Toma(duration > 0 ? Math.min(8.0, duration / 2.0) : 1.0, 128, 0));
+            }
+            for (Toma toma : elegidas) {
+                if (out.length() >= 8) break;
+                String jpeg = jpegEn(retriever, toma.time);
+                if (jpeg.length() < 500) continue;
+                JSONObject item = new JSONObject();
+                item.put("jpeg", jpeg);
+                item.put("tiempo", Math.round(toma.time * 100.0) / 100.0);
+                out.put(item);
             }
         } catch (Exception ignored) {
             return out;
         }
         return out;
+    }
+
+    private static double pasoDe(double duration) {
+        if (duration <= 15) return Math.max(0.35, duration / 10.0);
+        double step = Math.max(6.0, duration / 180.0);
+        if (duration / step > 220) step = duration / 220.0;
+        return Math.min(step, 30.0);
+    }
+
+    private static boolean cerca(List<Toma> items, double time) {
+        for (Toma item : items) {
+            if (Math.abs(item.time - time) < 0.4) return true;
+        }
+        return false;
+    }
+
+    private static List<Toma> elegirTomas(List<Toma> items) {
+        List<Toma> usable = new ArrayList<>();
+        for (Toma item : items) {
+            if (item.avg >= 6 && item.avg <= 250) usable.add(item);
+        }
+        List<Toma> pool = new ArrayList<>(usable.isEmpty() ? items : usable);
+        pool.sort((a, b) -> Double.compare(a.time, b.time));
+        List<Toma> kept = new ArrayList<>();
+        for (Toma item : pool) {
+            if (!kept.isEmpty()) {
+                Toma last = kept.get(kept.size() - 1);
+                if (item.bits == last.bits && Math.abs(item.time - last.time) < 8) continue;
+            }
+            kept.add(item);
+        }
+        if (kept.size() <= 8) return kept;
+        List<Toma> picked = new ArrayList<>();
+        int lastIndex = -1;
+        int span = kept.size() - 1;
+        for (int index = 0; index < 8; index++) {
+            int choose = (int) Math.round(index * (double) span / 7.0);
+            if (choose == lastIndex) continue;
+            picked.add(kept.get(choose));
+            lastIndex = choose;
+        }
+        return picked;
+    }
+
+    private static Muestra cuadroEn(MediaMetadataRetriever retriever, double seconds) {
+        Bitmap frame = null;
+        Bitmap small = null;
+        try {
+            long mark = (long) (seconds * 1000000.0);
+            frame = retriever.getFrameAtTime(mark, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (frame == null) frame = retriever.getFrameAtTime(mark, MediaMetadataRetriever.OPTION_CLOSEST);
+            if (frame == null) return null;
+            int width = Math.min(160, Math.max(1, frame.getWidth()));
+            int height = Math.max(1, Math.round(frame.getHeight() * (width / (float) frame.getWidth())));
+            small = width == frame.getWidth() ? frame : Bitmap.createScaledBitmap(frame, width, height, true);
+            if (small != frame) {
+                frame.recycle();
+                frame = null;
+            }
+            return muestraDe(small, seconds);
+        } catch (Exception error) {
+            return null;
+        } finally {
+            if (frame != null && frame != small && !frame.isRecycled()) frame.recycle();
+            if (small != null && !small.isRecycled()) small.recycle();
+        }
+    }
+
+    private static String jpegEn(MediaMetadataRetriever retriever, double seconds) {
+        Bitmap frame = null;
+        Bitmap scaled = null;
+        try {
+            long mark = (long) (seconds * 1000000.0);
+            frame = retriever.getFrameAtTime(mark, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (frame == null) frame = retriever.getFrameAtTime(mark, MediaMetadataRetriever.OPTION_CLOSEST);
+            if (frame == null) return "";
+            scaled = escalar(frame);
+            if (scaled != frame) {
+                frame.recycle();
+                frame = null;
+            }
+            return jpegDe(scaled);
+        } catch (Exception error) {
+            return "";
+        } finally {
+            if (frame != null && frame != scaled && !frame.isRecycled()) frame.recycle();
+            if (scaled != null && !scaled.isRecycled()) scaled.recycle();
+        }
+    }
+
+    private static Muestra muestraDe(Bitmap bitmap, double time) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        if (width < 2 || height < 2) return null;
+        int[] vals = new int[256];
+        long sum = 0;
+        int count = 0;
+        for (int y = 0; y < 16; y++) {
+            int py = Math.min(height - 1, (int) ((y + 0.5) * height / 16.0));
+            for (int x = 0; x < 16; x++) {
+                int px = Math.min(width - 1, (int) ((x + 0.5) * width / 16.0));
+                int pixel = bitmap.getPixel(px, py);
+                int lum = (((pixel >> 16) & 255) * 3 + ((pixel >> 8) & 255) * 6 + (pixel & 255)) / 10;
+                vals[count] = lum;
+                sum += lum;
+                count += 1;
+            }
+        }
+        double avg = sum / (double) vals.length;
+        long bits = 0;
+        int bit = 0;
+        for (int y = 0; y < 16; y += 2) {
+            for (int x = 0; x < 16; x += 2) {
+                if (vals[y * 16 + x] >= avg) bits |= 1L << bit;
+                bit += 1;
+            }
+        }
+        return new Muestra(time, avg, bits, vals);
+    }
+
+    private static double diferencia(int[] antes, int[] ahora) {
+        int n = Math.min(antes.length, ahora.length);
+        if (n == 0) return 0;
+        long sum = 0;
+        for (int index = 0; index < n; index++) sum += Math.abs(antes[index] - ahora[index]);
+        return (sum / (double) n) / 255.0;
+    }
+
+    private static final class Muestra {
+        final double avg;
+        final long bits;
+        final int[] vals;
+
+        Muestra(double time, double avg, long bits, int[] vals) {
+            this.avg = avg;
+            this.bits = bits;
+            this.vals = vals;
+        }
+    }
+
+    private static final class Toma {
+        final double time;
+        final double avg;
+        final long bits;
+
+        Toma(double time, double avg, long bits) {
+            this.time = time;
+            this.avg = avg;
+            this.bits = bits;
+        }
     }
 
     private static Bitmap escalar(Bitmap frame) {
@@ -324,46 +483,6 @@ public class YouTubePlugin extends Plugin {
         if (width <= 0 || height <= 0 || width <= 960) return frame;
         int next = Math.max(1, Math.round(height * (960f / width)));
         return Bitmap.createScaledBitmap(frame, 960, next, true);
-    }
-
-    private static boolean casiNegro(Bitmap bitmap) {
-        int width = bitmap.getWidth();
-        int height = bitmap.getHeight();
-        if (width < 2 || height < 2) return true;
-        long sum = 0;
-        int count = 0;
-        int stepX = Math.max(1, width / 10);
-        int stepY = Math.max(1, height / 10);
-        for (int y = stepY / 2; y < height; y += stepY) {
-            for (int x = stepX / 2; x < width; x += stepX) {
-                int pixel = bitmap.getPixel(x, y);
-                int red = (pixel >> 16) & 255;
-                int green = (pixel >> 8) & 255;
-                int blue = pixel & 255;
-                sum += (red * 3L + green * 6L + blue) / 10L;
-                count++;
-            }
-        }
-        return count == 0 || sum / count < 14;
-    }
-
-    private static String firmaDe(Bitmap bitmap) {
-        int width = bitmap.getWidth();
-        int height = bitmap.getHeight();
-        StringBuilder bits = new StringBuilder();
-        int stepX = Math.max(1, width / 10);
-        int stepY = Math.max(1, height / 10);
-        for (int y = stepY / 2; y < height; y += stepY) {
-            for (int x = stepX / 2; x < width; x += stepX) {
-                int pixel = bitmap.getPixel(x, y);
-                int red = (pixel >> 16) & 255;
-                int green = (pixel >> 8) & 255;
-                int blue = pixel & 255;
-                int lum = (int) ((red * 3L + green * 6L + blue) / 10L);
-                bits.append(lum > 28 ? '1' : '0');
-            }
-        }
-        return bits.toString();
     }
 
     private static String jpegDe(Bitmap bitmap) {

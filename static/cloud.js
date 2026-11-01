@@ -1563,23 +1563,69 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
 
   const capturasPendientes = new Map();
 
+  function pasoDe(duration) {
+    if (duration <= 15) return Math.max(0.35, duration / 10);
+    let step = Math.max(6, duration / 180);
+    if (duration / step > 220) step = duration / 220;
+    return Math.min(step, 30);
+  }
+
   function muestraDe(ctx, width, height) {
-    const stepX = Math.max(1, Math.floor(width / 10));
-    const stepY = Math.max(1, Math.floor(height / 10));
     const data = ctx.getImageData(0, 0, width, height).data;
-    let bits = "";
-    let luz = 0;
-    let count = 0;
-    for (let y = Math.floor(stepY / 2); y < height; y += stepY) {
-      for (let x = Math.floor(stepX / 2); x < width; x += stepX) {
-        const i = (y * width + x) * 4;
+    const vals = new Array(256);
+    let sum = 0;
+    for (let y = 0; y < 16; y += 1) {
+      const py = Math.min(height - 1, Math.floor((y + 0.5) * height / 16));
+      for (let x = 0; x < 16; x += 1) {
+        const px = Math.min(width - 1, Math.floor((x + 0.5) * width / 16));
+        const i = (py * width + px) * 4;
         const lum = (data[i] * 3 + data[i + 1] * 6 + data[i + 2]) / 10;
-        luz += lum;
-        count += 1;
-        bits += lum > 28 ? "1" : "0";
+        vals[y * 16 + x] = lum;
+        sum += lum;
       }
     }
-    return { bits, luz: count ? luz / count : 0 };
+    const avg = sum / vals.length;
+    let bits = "";
+    for (let y = 0; y < 16; y += 2) {
+      for (let x = 0; x < 16; x += 2) bits += vals[y * 16 + x] >= avg ? "1" : "0";
+    }
+    return { avg, bits, vals };
+  }
+
+  function diferencia(antes, ahora) {
+    const n = Math.min(antes.length, ahora.length);
+    if (!n) return 0;
+    let sum = 0;
+    for (let index = 0; index < n; index += 1) sum += Math.abs(antes[index] - ahora[index]);
+    return (sum / n) / 255;
+  }
+
+  function cerca(items, time) {
+    return items.some((item) => Math.abs(item.time - time) < 0.4);
+  }
+
+  function elegirTomas(items) {
+    const usable = items.filter((item) => item.avg >= 6 && item.avg <= 250);
+    const pool = (usable.length ? usable : items).slice().sort((a, b) => a.time - b.time);
+    const kept = [];
+    for (const item of pool) {
+      if (kept.length) {
+        const last = kept[kept.length - 1];
+        if (item.bits === last.bits && Math.abs(item.time - last.time) < 8) continue;
+      }
+      kept.push(item);
+    }
+    if (kept.length <= 8) return kept;
+    const picked = [];
+    let lastIndex = -1;
+    const span = kept.length - 1;
+    for (let index = 0; index < 8; index += 1) {
+      const choose = Math.round((index * span) / 7);
+      if (choose === lastIndex) continue;
+      picked.push(kept[choose]);
+      lastIndex = choose;
+    }
+    return picked;
   }
 
   function esperarSeek(video, time) {
@@ -1604,19 +1650,25 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     });
   }
 
-  function cuadroListo() {
+  function cuadroListo(video, draw) {
     return new Promise((resolve) => {
       let done = false;
-      const finish = () => {
+      const paint = () => {
         if (done) return;
         done = true;
+        clearTimeout(timer);
+        try { if (draw) draw(); } catch { /* este cuadro se salta */ }
         resolve();
       };
-      const timer = setTimeout(finish, 280);
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        clearTimeout(timer);
-        finish();
-      }));
+      const timer = setTimeout(paint, 450);
+      if (video && typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(() => {
+          clearTimeout(timer);
+          paint();
+        });
+        return;
+      }
+      setTimeout(() => requestAnimationFrame(paint), 100);
     });
   }
 
@@ -1673,7 +1725,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
         if (objectUrl) URL.revokeObjectURL(objectUrl);
         resolve(Array.isArray(frames) ? frames : []);
       };
-      timer = setTimeout(() => finish([]), 75000);
+      timer = setTimeout(() => finish([]), 180000);
       metaTimer = setTimeout(() => finish([]), 20000);
       video.onerror = () => finish([]);
       objectUrl = URL.createObjectURL(file);
@@ -1701,35 +1753,71 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
             if (primerPlay && typeof primerPlay.then === "function") await primerPlay.catch(() => {});
             video.pause();
           } catch { /* el seek igual puede sacar el cuadro */ }
+          const scan = document.createElement("canvas");
+          const scanW = Math.min(160, video.videoWidth);
+          const scanH = Math.max(1, Math.round(video.videoHeight * (scanW / video.videoWidth)));
+          scan.width = scanW;
+          scan.height = scanH;
+          const scanCtx = scan.getContext("2d", { willReadFrequently: true });
           const canvas = document.createElement("canvas");
           const width = Math.min(960, video.videoWidth);
           const height = Math.max(1, Math.round(video.videoHeight * (width / video.videoWidth)));
           canvas.width = width;
           canvas.height = height;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) {
+          if (!scanCtx || !ctx) {
             finish([]);
             return;
           }
-          const frames = [];
-          let previous = "";
-          for (let index = 0; index < 10 && frames.length < 8; index += 1) {
+          const step = pasoDe(duration);
+          const fin = Math.max(0.2, duration - 0.05);
+          const early = Math.min(2, duration / 3);
+          const estimadas = Math.min(240, Math.ceil(duration / step) + 3);
+          clearTimeout(timer);
+          timer = setTimeout(() => finish([]), Math.min(180000, 20000 + estimadas * 700));
+          const cambios = [];
+          let anterior = null;
+          let temprana = null;
+          let guard = 0;
+          for (let cursor = Math.min(0.3, fin); cursor <= fin + 0.001 && guard < 240; cursor += step) {
             if (settled) return;
-            const time = Math.min(
-              Math.max(0, duration - 0.05),
-              Math.max(0.2, duration * ((index + 0.5) / 10)),
-            );
+            guard += 1;
+            const at = Math.min(fin, Math.max(0.1, cursor));
             try {
-              await esperarSeek(video, time);
-              await cuadroListo();
+              await esperarSeek(video, at);
               if (settled) return;
-              ctx.drawImage(video, 0, 0, width, height);
-              const muestra = muestraDe(ctx, width, height);
-              if (!muestra.bits || muestra.luz < 14 || muestra.bits === previous) continue;
+              let muestra = null;
+              await cuadroListo(video, () => {
+                scanCtx.drawImage(video, 0, 0, scanW, scanH);
+                muestra = muestraDe(scanCtx, scanW, scanH);
+              });
+              if (settled || !muestra || !muestra.bits) continue;
+              if (!temprana && at + 0.001 >= Math.min(early, fin)) temprana = { time: at, avg: muestra.avg, bits: muestra.bits };
+              if (anterior && diferencia(anterior, muestra.vals) < 0.18) {
+                anterior = muestra.vals;
+                continue;
+              }
+              cambios.push({ time: at, avg: muestra.avg, bits: muestra.bits });
+              anterior = muestra.vals;
+            } catch { /* esta muestra se salta */ }
+          }
+          if (settled) return;
+          if (temprana && !cerca(cambios, temprana.time)) cambios.unshift(temprana);
+          let elegidas = elegirTomas(cambios);
+          if (!elegidas.length) elegidas = [{ time: duration > 0 ? Math.min(8, duration / 2) : 1, avg: 128, bits: "" }];
+          const frames = [];
+          for (const toma of elegidas) {
+            if (settled || frames.length >= 8) return finish(frames);
+            try {
+              await esperarSeek(video, toma.time);
+              if (settled) return;
+              await cuadroListo(video, () => {
+                ctx.drawImage(video, 0, 0, width, height);
+              });
+              if (settled) return;
               const jpeg = await jpegDelCanvas(canvas);
               if (!jpeg) continue;
-              previous = muestra.bits;
-              frames.push({ ...jpeg, time });
+              frames.push({ ...jpeg, time: toma.time });
             } catch { /* esta captura se salta */ }
           }
           finish(frames);
