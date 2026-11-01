@@ -58,8 +58,26 @@
     return btoa(binary);
   }
 
+  function errorDeRed() {
+    const error = new Error("No hay conexión con las clases. Revisa internet y vuelve a intentar.");
+    error.red = true;
+    return error;
+  }
+
+  async function pedir(url, options) {
+    try {
+      return await fetch(url, options);
+    } catch {
+      throw errorDeRed();
+    }
+  }
+
+  function selectDe(campos) {
+    return encodeURIComponent(campos).replace(/%3A/gi, ":").replace(/%2C/gi, ",");
+  }
+
   async function auth(body) {
-    const response = await fetch(`${cfg.url}/auth/v1/token?grant_type=${body.grant_type}`, {
+    const response = await pedir(`${cfg.url}/auth/v1/token?grant_type=${body.grant_type}`, {
       method: "POST",
       headers: { apikey: cfg.anon, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -84,7 +102,9 @@
       try {
         await auth({ grant_type: "refresh_token", refresh_token: saved.refresh });
         return;
-      } catch { /* entra de nuevo */ }
+      } catch (error) {
+        if (error && error.red) throw error;
+      }
     }
     if (native || !cfg.password) throw new Error("La sesión venció. Recarga la página para entrar de nuevo.");
     await auth({ grant_type: "password", email: cfg.email, password: cfg.password });
@@ -99,7 +119,7 @@
       headers.Prefer = "return=minimal";
       payload = JSON.stringify(body);
     }
-    const response = await fetch(cfg.url + path, { method, headers, body: payload });
+    const response = await pedir(cfg.url + path, { method, headers, body: payload });
     if (response.status === 401 && !retry) {
       localStorage.removeItem(sessionKey);
       access = "";
@@ -355,14 +375,16 @@
   function card(row) {
     const estado = row.estado || "lista";
     const started = Date.parse(row.creado || "");
-    const avisos = Array.isArray(row.estudio?.avisos) ? row.estudio.avisos.length : 0;
+    const estudio = row.estudio && typeof row.estudio === "object" ? row.estudio : {};
+    const avisosRaw = Array.isArray(estudio.avisos) ? estudio.avisos : row.estudio_avisos;
+    const avisos = Array.isArray(avisosRaw) ? avisosRaw.length : 0;
     const watch = typeof youtubeHref === "function" ? youtubeHref(row.video_url || "") : "";
     const remote = watch ? "" : playback(row.video_url || "");
-    const estudio = row.estudio || {};
-    const custom = Boolean(estudio.titulo_custom);
+    const custom = Boolean(estudio.titulo_custom || row.estudio_custom);
+    const estudioTitulo = estudio.titulo || row.estudio_titulo || "";
     const titulo = custom
-      ? (estudio.titulo || row.titulo || "Clase")
-      : (row.titulo || estudio.titulo || "Clase");
+      ? (estudioTitulo || row.titulo || "Clase")
+      : (row.titulo || estudioTitulo || "Clase");
     return {
       id: row.id,
       title: titulo,
@@ -373,8 +395,8 @@
       detail: row.detalle || "",
       error: estado === "error" ? (row.detalle || "Se detuvo.") : "",
       created: row.creado || "",
-      fecha: fechaIso(row.estudio && row.estudio.fecha_clase),
-      hora: horaClase(row.estudio && row.estudio.hora_clase),
+      fecha: fechaIso(estudio.fecha_clase || row.estudio_fecha),
+      hora: horaClase(estudio.hora_clase || row.estudio_hora),
       started: Number.isFinite(started) ? Math.floor(started / 1000) : 0,
       duration: row.duracion || 0,
       avisos,
@@ -495,7 +517,7 @@
     if (claves.length && typeof avisoDuplicado === "function" && typeof clavesDeFila === "function") {
       let rows = null;
       try {
-        rows = await rest("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio->fuentes&limit=1000");
+        rows = await rest("GET", "/rest/v1/clases?select=" + selectDe("id,titulo,video_url,estudio_fuentes:estudio->fuentes") + "&limit=1000");
       } catch {
         rows = null;
       }
@@ -1022,7 +1044,8 @@
       const cursos = await cursosDeEstudio();
       const pack = publicarCursos(cursos, readCursoId());
       if (!pack.activo) return { classes: [], cursos: pack };
-      const rows = await rest("GET", `/rest/v1/clases?select=id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio->titulo,estudio->titulo_custom,estudio->fecha_clase,estudio->hora_clase,estudio->avisos&curso_id=eq.${pack.activo}&order=creado.desc`);
+      const select = selectDe("id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio_titulo:estudio->titulo,estudio_custom:estudio->titulo_custom,estudio_fecha:estudio->fecha_clase,estudio_hora:estudio->hora_clase,estudio_avisos:estudio->avisos");
+      const rows = await rest("GET", `/rest/v1/clases?select=${select}&curso_id=eq.${pack.activo}&order=creado.desc`);
       const estudio = estudioActual();
       const list = (Array.isArray(rows) ? rows : []).filter((row) => (
         estudio

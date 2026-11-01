@@ -181,7 +181,7 @@ function avisoDuplicado(titulo, tipo) {
 
 function clavesDeFila(row) {
   const keys = [fuenteZoom(row && row.video_url), fuenteYouTube(row && row.video_url)];
-  const fuentes = row && row.estudio && row.estudio.fuentes;
+  const fuentes = (row && row.estudio && row.estudio.fuentes) || (row && row.estudio_fuentes);
   if (Array.isArray(fuentes)) keys.push(...fuentes);
   return limpiarFuentes(keys);
 }
@@ -260,7 +260,14 @@ function elapsed(started) {
 
 async function api(url, options) {
   if (window.claseClaraCloud) return window.claseClaraCloud.api(url, options);
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch {
+    const error = new Error("No pude hablar con ClaseClara en esta computadora. Ábrelo con iniciar.bat y deja esa ventana abierta.");
+    error.red = true;
+    throw error;
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || "No se pudo completar.");
@@ -1744,15 +1751,14 @@ async function saveFromPhone() {
   }
   const button = document.querySelector("#go");
   button.disabled = true;
+  let id = "";
   try {
-    const id = await window.claseClaraCloud.saveEntry({
+    id = await window.claseClaraCloud.saveEntry({
       link,
       file,
       fecha: file && !link ? fechaDelArchivo(file) : "",
       onProgress: (text) => { button.textContent = text; },
     });
-    cerrarPreparar(true);
-    await openClass(id);
   } catch (error) {
     alert(error.message);
     if (error && error.duplicado) {
@@ -1762,6 +1768,25 @@ async function saveFromPhone() {
     }
     button.disabled = false;
     button.textContent = "Preparar clase";
+    return;
+  }
+  cerrarPreparar(true);
+  try {
+    await openClass(id);
+  } catch (error) {
+    if (error && error.red) {
+      shown = "";
+      renderProcess({
+        id,
+        status: "processing",
+        stage: "audio",
+        detail: "La computadora prepara el video y lo publica",
+        started: Math.floor(Date.now() / 1000),
+      });
+      watch(id);
+      return;
+    }
+    alert(error.message);
   }
 }
 
@@ -1871,6 +1896,21 @@ function watch(id) {
         stopPoll();
       }
     } catch (error) {
+      if (error && error.red) {
+        if (!document.querySelector("#process")) {
+          renderProcess({
+            id,
+            status: "processing",
+            stage: "audio",
+            detail: "Sin conexión. Sigo intentando…",
+            started: Math.floor(Date.now() / 1000),
+          });
+        } else {
+          const detail = document.querySelector("#detail");
+          if (detail) detail.textContent = "Sin conexión. Sigo intentando…";
+        }
+        return;
+      }
       stopPoll();
       renderProcess({ id, status: "error", stage: "error", error: error.message });
     }
