@@ -539,7 +539,7 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 .phone-app .player-slot.mini .player-grip {
   display: block;
   position: absolute;
-  z-index: 2;
+  z-index: 5;
   left: 0;
   right: 0;
   top: 0;
@@ -554,7 +554,7 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 .player-slot.mini .player-hide {
   display: block;
   position: absolute;
-  z-index: 3;
+  z-index: 6;
   top: 4px;
   right: 4px;
   height: 28px;
@@ -650,6 +650,152 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
   width: 100%;
   height: auto;
 }
+
+.yt-vista {
+  --yt-corte: 72px;
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(420px, 46vh);
+  border-radius: 14px;
+  background: #111;
+}
+
+.player-slot .yt-vista iframe {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: calc(var(--yt-corte) * -1);
+  height: calc(100% + var(--yt-corte));
+  max-height: none;
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 0;
+  background: #111;
+}
+
+.player-slot.mini .yt-vista {
+  --yt-corte: 36px;
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.player-slot.mini .yt-vista iframe {
+  top: calc(var(--yt-corte) * -1) !important;
+  bottom: auto !important;
+  height: calc(100% + var(--yt-corte)) !important;
+}
+
+.yt-vista:fullscreen,
+.yt-vista:-webkit-full-screen {
+  --yt-corte: 96px;
+  max-height: none;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+  background: #000;
+}
+
+.yt-canal,
+.yt-marca,
+.yt-copia {
+  position: absolute;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.yt-canal {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 0;
+}
+
+.yt-vista.yt-fin .yt-canal {
+  height: 100%;
+  background: rgba(17, 17, 17, 0.94);
+}
+
+.yt-marca,
+.yt-copia {
+  bottom: 0;
+  height: 54px;
+  background: #111;
+}
+
+.yt-marca {
+  right: 0;
+  width: min(240px, 58%);
+}
+
+.yt-copia {
+  left: 0;
+  width: 80px;
+}
+
+.yt-vista.yt-viendo .yt-copia {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.yt-vista.yt-viendo .yt-marca {
+  width: 100px;
+  height: 28px;
+  bottom: 36px;
+  background: transparent;
+}
+
+.player-slot.mini .yt-marca { width: 108px; height: 30px; }
+.player-slot.mini .yt-copia { width: 40px; height: 30px; }
+
+.yt-vista.yt-fin .yt-marca,
+.yt-vista.yt-fin .yt-copia { display: none; }
+
+.yt-play {
+  display: none;
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(28, 25, 21, 0.92);
+  color: #f6f1e7;
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.yt-vista.yt-fin .yt-play { display: block; }
+.yt-play[hidden] { display: none !important; }
+
+.yt-full {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  right: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(28, 25, 21, 0.88);
+  color: #f6f1e7;
+  font: inherit;
+  font-size: 13px;
+  line-height: 32px;
+  cursor: pointer;
+}
+
+.player-slot.mini .yt-full { display: none; }
 
 .class-tools {
   display: flex;
@@ -973,6 +1119,7 @@ body.seeing-frame { overflow: hidden; }
   .hard p { font-size: 17px; }
   .player-slot video.player,
   .player-slot iframe { max-height: 34vh; }
+  .player-slot .yt-vista { --yt-corte: 56px; max-height: 34vh; }
   .player-slot.mini { left: 12px; bottom: 12px; width: min(220px, calc(100vw - 24px)); }
   .player-slot.mini video.player,
   .player-slot.mini iframe { max-height: none; }
