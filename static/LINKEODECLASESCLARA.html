@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>LINKEODECLASESCLARA</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css?v=20261101c">
+  <style>
+    .linkeo { width: min(980px, calc(100% - 32px)); margin: 28px auto 64px; }
+    .linkeo h1 { font-family: Georgia, "Palatino Linotype", serif; font-size: 34px; letter-spacing: -0.04em; margin: 0 0 8px; }
+    .entrada { display: grid; gap: 12px; margin-top: 18px; }
+    .entrada label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
+    .entrada input { border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 11px 12px; }
+    .fila { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .curso { margin-top: 18px; }
+    .curso h2 { font-size: 22px; margin: 0 0 4px; }
+    .prof { margin: 0 0 12px; color: var(--brass); }
+    table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+    th, td { text-align: left; vertical-align: top; padding: 8px 8px 8px 0; border-top: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+    td a { color: var(--brass); }
+    .vacio { color: var(--muted); }
+    .error { color: var(--red); }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <span class="brand">LINKEODECLASESCLARA</span>
+    <p class="tag">Lee tus cursos en Clementina. Esta página no aparece dentro de Clase Clara.</p>
+  </header>
+  <main class="linkeo">
+    <h1>LINKEODECLASESCLARA</h1>
+    <p class="note">Entra con tu usuario de Clementina. La contraseña se usa solo para esta lectura y no se guarda.</p>
+    <form class="entrada" id="forma">
+      <label>Usuario o correo
+        <input id="usuario" name="usuario" autocomplete="username" required maxlength="200">
+      </label>
+      <label>Contraseña
+        <input id="clave" name="clave" type="password" autocomplete="current-password" required maxlength="200">
+      </label>
+      <div class="fila">
+        <button class="primary" id="buscar" type="submit">Buscar clases</button>
+        <p class="note" id="estado"></p>
+      </div>
+    </form>
+    <div id="resultado"></div>
+  </main>
+  <script>
+    const forma = document.querySelector("#forma");
+    const usuario = document.querySelector("#usuario");
+    const clave = document.querySelector("#clave");
+    const estado = document.querySelector("#estado");
+    const resultado = document.querySelector("#resultado");
+    const destino = location.hostname.endsWith("netlify.app") || location.hostname === "localhost"
+      ? "/.netlify/functions/linkeo"
+      : "https://clases-universitarias.netlify.app/.netlify/functions/linkeo";
+
+    try { usuario.value = localStorage.getItem("linkeo-usuario") || ""; } catch (e) {}
+
+    function esc(value) {
+      return String(value || "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[ch]));
+    }
+
+    function enlaces(lista) {
+      if (!lista || !lista.length) return '<span class="vacio">Sin enlace</span>';
+      return lista.map((item) => (
+        `<div><a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.zoom ? "Zoom" : item.nombre)}</a></div>`
+      )).join("");
+    }
+
+    function pintar(data) {
+      const cursos = Array.isArray(data.cursos) ? data.cursos : [];
+      const sesiones = cursos.reduce((total, curso) => total + ((curso.sesiones && curso.sesiones.length) || 0), 0);
+      const cuenta = data.cuenta ? `Entraste como ${esc(data.cuenta)}. ` : "";
+      const bloques = cursos.map((curso) => {
+        const filas = (curso.sesiones || []).map((sesion) => `
+          <tr>
+            <td>${esc(sesion.numero ? "Sesión " + sesion.numero : "—")}</td>
+            <td>${esc(sesion.titulo)}</td>
+            <td>${esc(sesion.fecha || "—")}</td>
+            <td>${esc(sesion.hora || "—")}</td>
+            <td>${enlaces(sesion.enlaces)}</td>
+          </tr>`).join("");
+        const cuerpo = filas
+          ? `<table><thead><tr><th>Sesión</th><th>Título</th><th>Fecha</th><th>Hora</th><th>Enlace</th></tr></thead><tbody>${filas}</tbody></table>`
+          : `<p class="vacio">${esc(curso.aviso || "Este curso no tiene sesiones para mostrar.")}</p>`;
+        return `<article class="card curso"><h2>${esc(curso.nombre)}</h2><p class="prof">${esc(curso.profesor || "Sin profesor visible")}</p>${cuerpo}</article>`;
+      }).join("");
+      resultado.innerHTML = `<p class="note">${cuenta}${cursos.length} cursos, ${sesiones} sesiones.</p>${bloques}`;
+    }
+
+    forma.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const boton = document.querySelector("#buscar");
+      boton.disabled = true;
+      estado.className = "note";
+      estado.textContent = "Leyendo Clementina…";
+      resultado.innerHTML = "";
+      try { localStorage.setItem("linkeo-usuario", usuario.value.trim()); } catch (e) {}
+      try {
+        const response = await fetch(destino, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ usuario: usuario.value.trim(), clave: clave.value }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 404) throw new Error("La lectura todavía no está publicada en el sitio.");
+        if (!response.ok) throw new Error(data.error || "No pude leer Clementina.");
+        estado.textContent = "";
+        pintar(data);
+      } catch (error) {
+        estado.className = "note error";
+        estado.textContent = error.message || "No pude leer Clementina.";
+      } finally {
+        boton.disabled = false;
+        clave.value = "";
+      }
+    });
+  </script>
+</body>
+</html>

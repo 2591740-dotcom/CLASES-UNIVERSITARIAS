@@ -2,6 +2,11 @@
   publish = "static"
   command = "node scripts/write-config.js"
 
+[[redirects]]
+  from = "/LINKEODECLASESCLARA"
+  to = "/LINKEODECLASESCLARA.html"
+  status = 200
+
 [build.environment]
   NODE_VERSION = "20"
   # La clave anon es pública. La contraseña no se escribe en el sitio.
