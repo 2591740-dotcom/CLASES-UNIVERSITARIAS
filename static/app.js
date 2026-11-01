@@ -1603,13 +1603,13 @@ function processHtml(job) {
       <ul class="steps" id="steps">${stepsHtml(job)}</ul>
       ${error}
       <p class="note">${window.claseClaraCloud
-        ? "Una clase de una hora suele tardar unos minutos. Deja esta pantalla abierta. La explicación se escribe en la computadora donde ClaseClara está abierto."
+        ? "Se prepara en este aparato. Deja esta pantalla abierta. Una clase de una hora puede tardar varios minutos."
         : "Una clase de una hora suele tardar unos minutos. Puedes dejar esta página abierta."}</p>
     </section>`;
 }
 
 function youtubeProgress(job) {
-  if ((job.media_kind === "youtube" && job.media_src) || job.youtube_state === "listo") return "";
+  if ((job.media_kind === "youtube" && job.media_src) || job.youtube_state === "listo" || !job.youtube_state) return "";
   if (job.youtube_state === "error") {
     return `<p class="note">${esc(job.youtube_error || "No se pudo subir el video a YouTube.")}</p>`;
   }
@@ -1699,7 +1699,7 @@ function ensureProcessPlayer(job) {
   player?.addEventListener("error", () => {
     const note = document.createElement("p");
     note.className = "note";
-    note.textContent = "Este aparato todavía no reproduce ese video. Cuando la computadora lo publique, queda aquí.";
+    note.textContent = "Este aparato todavía no reproduce ese video. Cuando termine de prepararse, vuelve a abrirlo.";
     player.replaceWith(note);
   });
   bindMiniPlayer();
@@ -1772,15 +1772,21 @@ async function saveFromPhone() {
   }
   cerrarPreparar(true);
   try {
-    await openClass(id);
+    await openClass(id, { espera: true });
+    if (window.claseClaraCloud && window.claseClaraCloud.preparar) {
+      window.claseClaraCloud.preparar(id, { file, link });
+    }
   } catch (error) {
+    if (window.claseClaraCloud && window.claseClaraCloud.preparar) {
+      window.claseClaraCloud.preparar(id, { file, link });
+    }
     if (error && error.red) {
       shown = "";
       renderProcess({
         id,
         status: "processing",
         stage: "audio",
-        detail: "La computadora prepara el video y lo publica",
+        detail: "Este aparato prepara la clase",
         started: Math.floor(Date.now() / 1000),
       });
       watch(id);
@@ -4109,7 +4115,7 @@ function seekClass(seconds) {
   player.play().catch(() => {});
 }
 
-async function openClass(id) {
+async function openClass(id, opciones) {
   homeToken += 1;
   closeWikiPeek();
   stopSpeech();
@@ -4119,8 +4125,14 @@ async function openClass(id) {
   const study = data.study || {};
   const hasStudy = (study.explicacion || []).length || study.resumen;
   if (data.status === "processing" || (data.status === "error" && !hasStudy)) {
-    if (data.status === "processing") watch(id);
-    else renderProcess(data);
+    if (data.status === "processing") {
+      watch(id);
+      const detail = String(data.detail || "");
+      const deAqui = /este aparato|transcribiendo|escribiendo la explicación|enviando el audio/i.test(detail);
+      if (deAqui && !(opciones && opciones.espera) && window.claseClaraCloud && window.claseClaraCloud.preparar) {
+        window.claseClaraCloud.preparar(id);
+      }
+    } else renderProcess(data);
     return;
   }
   clase = data;
