@@ -504,6 +504,8 @@
     if (file && !acceptedMedia(file)) {
       throw new Error("Ese archivo no es el video. Elige el .mp4, .mkv o el audio .m4a.");
     }
+    const id = classId || newId();
+    if (file && !link && !native) empezarCapturas(id, file);
     let claves = [];
     if (typeof clavesDeEntrada === "function") {
       try {
@@ -536,7 +538,6 @@
         }
       }
     }
-    const id = classId || newId();
     const course = (materia || "").slice(0, 120);
     const nativeStore = Boolean(file && window.Capacitor?.Plugins?.Filesystem && file.stream);
     if (file && nativeStore) await saveFile(id, file, onProgress);
@@ -1560,91 +1561,304 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     return ready;
   }
 
-  function capturarVideo(file) {
+  const capturasPendientes = new Map();
+
+  function muestraDe(ctx, width, height) {
+    const stepX = Math.max(1, Math.floor(width / 10));
+    const stepY = Math.max(1, Math.floor(height / 10));
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let bits = "";
+    let luz = 0;
+    let count = 0;
+    for (let y = Math.floor(stepY / 2); y < height; y += stepY) {
+      for (let x = Math.floor(stepX / 2); x < width; x += stepX) {
+        const i = (y * width + x) * 4;
+        const lum = (data[i] * 3 + data[i + 1] * 6 + data[i + 2]) / 10;
+        luz += lum;
+        count += 1;
+        bits += lum > 28 ? "1" : "0";
+      }
+    }
+    return { bits, luz: count ? luz / count : 0 };
+  }
+
+  function esperarSeek(video, time) {
+    return new Promise((resolve, reject) => {
+      if (Math.abs((Number(video.currentTime) || 0) - time) < 0.08 && video.readyState >= 2) {
+        resolve();
+        return;
+      }
+      let timer = 0;
+      const limpiar = () => {
+        clearTimeout(timer);
+        video.removeEventListener("seeked", listo);
+        video.removeEventListener("error", fallo);
+      };
+      const listo = () => { limpiar(); resolve(); };
+      const fallo = () => { limpiar(); reject(new Error("seek")); };
+      timer = setTimeout(() => { limpiar(); reject(new Error("seek")); }, 8000);
+      video.addEventListener("seeked", listo);
+      video.addEventListener("error", fallo);
+      try { video.currentTime = time; }
+      catch (error) { limpiar(); reject(error); }
+    });
+  }
+
+  function cuadroListo() {
     return new Promise((resolve) => {
-      if (!file || typeof document === "undefined") {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const timer = setTimeout(finish, 280);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        clearTimeout(timer);
+        finish();
+      }));
+    });
+  }
+
+  async function jpegDelCanvas(canvas) {
+    for (const quality of [0.62, 0.48, 0.36]) {
+      const blob = await new Promise((ok) => {
+        try { canvas.toBlob((result) => ok(result || null), "image/jpeg", quality); }
+        catch { ok(null); }
+      });
+      if (blob && blob.size >= 400 && blob.size <= 280000) return { blob };
+      if (blob && blob.size > 280000) continue;
+      try {
+        const url = canvas.toDataURL("image/jpeg", quality);
+        const comma = url.indexOf(",");
+        const jpeg = comma >= 0 ? url.slice(comma + 1) : "";
+        if (jpeg.length >= 500 && jpeg.length <= 400000) return { jpeg };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function capturarMedio(file) {
+    return new Promise((resolve) => {
+      if (!file || typeof document === "undefined" || !document.body) {
         resolve([]);
         return;
       }
       const video = document.createElement("video");
       video.muted = true;
+      video.defaultMuted = true;
+      video.volume = 0;
       video.playsInline = true;
+      video.setAttribute("playsinline", "");
+      video.setAttribute("webkit-playsinline", "");
       video.preload = "auto";
-      const url = URL.createObjectURL(file);
+      video.autoplay = true;
+      video.style.cssText = "position:fixed;left:-240px;top:0;width:160px;height:90px;opacity:1;pointer-events:none";
+      document.body.appendChild(video);
+      let objectUrl = "";
       let settled = false;
+      let timer = 0;
+      let metaTimer = 0;
       const finish = (frames) => {
         if (settled) return;
         settled = true;
-        URL.revokeObjectURL(url);
-        resolve(frames || []);
-      };
-      const timer = setTimeout(() => finish([]), 25000);
-      video.onerror = () => {
         clearTimeout(timer);
-        finish([]);
+        clearTimeout(metaTimer);
+        try { video.pause(); } catch { /* ya estaba */ }
+        video.removeAttribute("src");
+        try { video.load(); } catch { /* ya se soltó */ }
+        if (video.parentNode) video.parentNode.removeChild(video);
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        resolve(Array.isArray(frames) ? frames : []);
       };
-      video.onloadedmetadata = async () => {
-        const duration = Number(video.duration) || 0;
-        if (!duration || !video.videoWidth) {
-          clearTimeout(timer);
-          finish([]);
-          return;
-        }
-        const canvas = document.createElement("canvas");
-        const width = Math.min(960, video.videoWidth);
-        const height = Math.max(1, Math.round(video.videoHeight * (width / video.videoWidth)));
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        const frames = [];
-        let previous = "";
-        for (let index = 0; index < 8; index += 1) {
-          const time = Math.min(duration - 0.05, Math.max(0.1, duration * ((index + 0.5) / 8)));
+      timer = setTimeout(() => finish([]), 75000);
+      metaTimer = setTimeout(() => finish([]), 20000);
+      video.onerror = () => finish([]);
+      objectUrl = URL.createObjectURL(file);
+      video.src = objectUrl;
+      let primerPlay = null;
+      try { primerPlay = video.play(); } catch { primerPlay = null; }
+      if (primerPlay && typeof primerPlay.catch === "function") primerPlay.catch(() => {});
+      let arranco = false;
+      video.onloadeddata = () => {
+        if (arranco) return;
+        arranco = true;
+        tomar();
+      };
+
+      async function tomar() {
+        if (settled) return;
+        clearTimeout(metaTimer);
+        try {
+          const duration = Number(video.duration);
+          if (!Number.isFinite(duration) || duration < 0.2 || !video.videoWidth || !video.videoHeight) {
+            finish([]);
+            return;
+          }
           try {
-            await new Promise((ok, fail) => {
-              const onSeek = () => {
-                video.removeEventListener("error", onErr);
-                ok();
-              };
-              const onErr = () => {
-                video.removeEventListener("seeked", onSeek);
-                fail(new Error("seek"));
-              };
-              video.addEventListener("seeked", onSeek, { once: true });
-              video.addEventListener("error", onErr, { once: true });
-              video.currentTime = time;
-            });
-            ctx.drawImage(video, 0, 0, width, height);
-            const sample = ctx.getImageData(0, 0, Math.min(8, width), Math.min(8, height)).data;
-            let bits = "";
-            for (let i = 0; i < sample.length; i += 16) bits += sample[i] > 128 ? "1" : "0";
-            if (bits && bits === previous) continue;
-            previous = bits;
-            const blob = await new Promise((ok) => canvas.toBlob((result) => ok(result), "image/jpeg", 0.72));
-            if (blob) frames.push({ blob, time });
-          } catch { /* esta captura se salta */ }
+            if (primerPlay && typeof primerPlay.then === "function") await primerPlay.catch(() => {});
+            video.pause();
+          } catch { /* el seek igual puede sacar el cuadro */ }
+          const canvas = document.createElement("canvas");
+          const width = Math.min(960, video.videoWidth);
+          const height = Math.max(1, Math.round(video.videoHeight * (width / video.videoWidth)));
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          if (!ctx) {
+            finish([]);
+            return;
+          }
+          const frames = [];
+          let previous = "";
+          for (let index = 0; index < 10 && frames.length < 8; index += 1) {
+            if (settled) return;
+            const time = Math.min(
+              Math.max(0, duration - 0.05),
+              Math.max(0.2, duration * ((index + 0.5) / 10)),
+            );
+            try {
+              await esperarSeek(video, time);
+              await cuadroListo();
+              if (settled) return;
+              ctx.drawImage(video, 0, 0, width, height);
+              const muestra = muestraDe(ctx, width, height);
+              if (!muestra.bits || muestra.luz < 14 || muestra.bits === previous) continue;
+              const jpeg = await jpegDelCanvas(canvas);
+              if (!jpeg) continue;
+              previous = muestra.bits;
+              frames.push({ ...jpeg, time });
+            } catch { /* esta captura se salta */ }
+          }
+          finish(frames);
+        } catch {
+          finish([]);
         }
-        clearTimeout(timer);
-        finish(frames);
-      };
-      video.src = url;
+      }
     });
   }
 
-  async function guardarCapturas(id, frames) {
-    const rows = [];
-    for (let index = 0; index < frames.length; index += 1) {
-      const name = `${id}/${String(index + 1).padStart(2, "0")}.jpg`;
-      await putPart(name, frames[index].blob, "No pude guardar una captura.");
-      rows.push({
-        clase_id: id,
-        orden: index + 1,
-        tiempo: Math.round(frames[index].time * 100) / 100,
-        imagen_path: name,
+  function empezarCapturas(id, file) {
+    if (!id || !file) return;
+    capturasPendientes.clear();
+    capturasPendientes.set(id, capturarMedio(file).catch(() => []));
+  }
+
+  function tomarCapturasPendientes(id) {
+    const job = capturasPendientes.get(id) || null;
+    if (job) capturasPendientes.delete(id);
+    return job;
+  }
+
+  function tomasAFrames(tomas) {
+    let list = tomas;
+    if (typeof list === "string") {
+      try { list = JSON.parse(list); } catch { list = []; }
+    }
+    const frames = [];
+    for (const item of Array.isArray(list) ? list : []) {
+      const jpeg = String((item && item.jpeg) || "");
+      if (jpeg.length < 500 || jpeg.length > 400000) continue;
+      const time = Number(item && (item.tiempo ?? item.time));
+      frames.push({ jpeg, time: Number.isFinite(time) ? time : 0 });
+    }
+    return frames.slice(0, 8);
+  }
+
+  async function capturarArchivo(id) {
+    if (!native) return [];
+    const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.ClaseClaraYouTube;
+    const files = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem;
+    if (!plugin || !files || typeof plugin.capturar !== "function" || typeof files.getUri !== "function") return [];
+    const path = videoMap()[id];
+    if (!path || path === "opfs" || path === "navegador") return [];
+    try {
+      const got = await files.getUri({ directory: "DATA", path });
+      const uri = got && got.uri ? String(got.uri) : "";
+      if (!uri) return [];
+      const result = await plugin.capturar({ archivo: uri });
+      return tomasAFrames(result && result.tomas);
+    } catch {
+      return [];
+    }
+  }
+
+  function prometerCapturas(id, saved) {
+    const pending = tomarCapturasPendientes(id);
+    if (native) {
+      return capturarArchivo(id).then((frames) => {
+        if (frames.length) return frames;
+        if (pending) return pending;
+        return saved ? capturarMedio(saved) : [];
+      }).catch(() => (pending || (saved ? capturarMedio(saved) : Promise.resolve([]))));
+    }
+    if (pending) return pending.catch(() => []);
+    if (saved) return capturarMedio(saved).catch(() => []);
+    return Promise.resolve([]);
+  }
+
+  async function blobABase64(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return bytesToBase64(bytes);
+  }
+
+  function idDeYouTube(watch) {
+    const found = String(watch || "").match(/[?&]v=([A-Za-z0-9_-]{11})/);
+    return found ? found[1] : "";
+  }
+
+  async function enviarCapturas(id, items, video, duration) {
+    await session();
+    const payload = { id, capturas: items };
+    if (!items.length && video) {
+      payload.video = video;
+      payload.duracion = Math.round(Number(duration) || 0);
+    }
+    const destino = "https://clases-universitarias.netlify.app/.netlify/functions/capturas";
+    if (native) {
+      const http = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+      if (!http) throw new Error("No pude guardar las capturas.");
+      const result = await http.request({
+        url: destino,
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+        data: payload,
+      });
+      let data = result ? result.data : {};
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { data = {}; }
+      }
+      if (!result || Number(result.status) >= 400) {
+        throw new Error((data && data.error) || "No pude guardar las capturas.");
+      }
+      return;
+    }
+    const response = await fetch("/.netlify/functions/capturas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "No pude guardar las capturas.");
+  }
+
+  async function guardarCapturas(id, frames, watch, duration) {
+    const items = [];
+    for (const frame of (frames || []).slice(0, 8)) {
+      let jpeg = String((frame && frame.jpeg) || "");
+      if (!jpeg && frame && frame.blob) jpeg = await blobABase64(frame.blob);
+      if (jpeg.length < 500 || jpeg.length > 400000) continue;
+      const time = Number(frame.time);
+      items.push({
+        jpeg,
+        tiempo: Number.isFinite(time) && time >= 0 ? Math.round(time * 100) / 100 : 0,
       });
     }
-    await rest("DELETE", `/rest/v1/diapositivas?clase_id=eq.${id}`);
-    if (rows.length) await rest("POST", "/rest/v1/diapositivas", rows);
+    const video = items.length ? "" : idDeYouTube(watch);
+    if (!items.length && !video) return;
+    await enviarCapturas(id, items, video, duration);
   }
 
   function horaEnNombre(text) {
@@ -1789,7 +2003,11 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       if (!watch.startsWith("https://www.youtube.com/watch?v=")) {
         throw new Error("YouTube no devolvió el video.");
       }
-      return { watch, nombre: String((medida && medida.nombre) || "") };
+      return {
+        watch,
+        nombre: String((medida && medida.nombre) || ""),
+        tomas: tomasAFrames(result && result.tomas),
+      };
     } finally {
       if (aviso && aviso.remove) aviso.remove();
     }
@@ -1846,6 +2064,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       if (!saved && !zoom) throw new Error("Vuelve a elegir el video o pega el enlace otra vez.");
       const yaYouTube = typeof youtubeHref === "function" && youtubeHref(row.video_url);
       let avisoYouTube = "";
+      let tomasZoom = [];
       let reloj = {
         hora: saved ? horaDeArchivo(saved) : "",
         fecha: saved && typeof fechaDelArchivo === "function" ? fechaDelArchivo(saved) : "",
@@ -1861,6 +2080,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
               if (hora) reloj.hora = hora;
               if (fecha) reloj.fecha = fecha;
             }
+            tomasZoom = tomasAFrames(result && result.tomas);
             return result && result.watch ? result.watch : "";
           })
         ).then(async (watch) => {
@@ -1873,7 +2093,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
           avisoYouTube = String((error && error.message) || "No pude subir el video a YouTube.").slice(0, 180);
           return "";
         });
-      const tomas = saved ? capturarVideo(saved).catch(() => []) : Promise.resolve([]);
+      const localFrames = prometerCapturas(id, saved);
       await say(saved ? "Enviando el audio…" : "Transcribiendo lo que se dijo");
       const stt = await transcribirDeepgram({
         key,
@@ -1890,13 +2110,18 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       const study = await explicarAqui(ia, row.materia || "", duration, lines);
       study.wiki = await resolverWiki(study.wiki);
       study.capturas = [];
-      const frames = await tomas;
+      let frames = await localFrames;
+      const watch = await subida;
+      const enlace = watch || (typeof yaYouTube === "string" ? yaYouTube : "");
+      if (!frames.length && tomasZoom.length) frames = tomasZoom;
       try {
-        if (frames.length) await guardarCapturas(id, frames);
+        if (frames.length || enlace) {
+          await say("Guardando capturas…");
+          await guardarCapturas(id, frames, enlace, duration);
+        }
       } catch { /* la explicación se guarda igual si una captura no entra */ }
       let fresco = row;
       try { fresco = await one(id); } catch { fresco = row; }
-      const watch = await subida;
       if (watch) {
         try {
           await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, { video_url: watch });

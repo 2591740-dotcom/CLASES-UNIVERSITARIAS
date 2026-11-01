@@ -3005,7 +3005,7 @@ function shotsHtml(data) {
         <strong>${esc(note?.por_que_importa || "")}</strong></figcaption>
     </figure>`;
   }).join("");
-  return `<div class="shots">${cards || '<p class="empty">Este archivo no tenía imagen. La explicación sale del audio.</p>'}</div>`;
+  return `<div class="shots">${cards || '<p class="empty">No se guardaron capturas de esta clase. La explicación sale de lo que se dijo.</p>'}</div>`;
 }
 
 function transcriptHtml(lines) {
