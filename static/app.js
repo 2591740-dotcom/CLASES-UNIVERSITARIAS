@@ -1727,7 +1727,7 @@ function ensureProcessPlayer(job) {
   const videoId = job.media_kind === "youtube" ? youtubeId(job.media_src || "") : "";
   if (videoId) {
     slot.dataset.ready = "1";
-    slot.innerHTML = youtubePlayerHtml(videoId);
+    slot.innerHTML = `${playerButtons(true)}<div id="player" class="player yt" data-yt="${esc(videoId)}"></div>`;
     mountYouTube(slot.querySelector("#player"));
     bindMiniPlayer();
     return;
@@ -2239,7 +2239,7 @@ function ensureFrameBox() {
 function playerHtml(data) {
   const yt = data.media_kind === "youtube" ? youtubeId(data.media_src) : "";
   if (yt) {
-    return `<div class="player-mark"></div><div class="player-slot">${youtubePlayerHtml(yt)}</div>`;
+    return `<div class="player-mark"></div><div class="player-slot">${playerButtons(true)}<div id="player" class="player yt" data-yt="${esc(yt)}"></div></div>`;
   }
   const src = data.media_src || (data.media_kind ? `/media/${data.id}/source` : "");
   if (!src) return "";
@@ -3715,10 +3715,6 @@ function playerButtons(youtube) {
   return `<button class="player-grip" type="button" aria-label="Mover el video"></button>${hide}`;
 }
 
-function youtubePlayerHtml(videoId) {
-  return `${playerButtons(true)}<div class="yt-vista"><div id="player" class="player yt" data-yt="${esc(videoId)}"></div><div class="yt-canal" aria-hidden="true"></div><div class="yt-marca" aria-hidden="true"></div><div class="yt-copia" aria-hidden="true"></div><button class="yt-play" type="button" hidden>Volver a ver</button><button class="yt-full" type="button" aria-label="Pantalla completa">Pantalla completa</button></div>`;
-}
-
 function phoneApp() {
   const cap = window.Capacitor;
   return Boolean(cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform());
@@ -4113,14 +4109,10 @@ function mountYouTube(node) {
         modestbranding: 1,
         playsinline: 1,
         enablejsapi: 1,
-        fs: 0,
-        iv_load_policy: 3,
         origin: location.origin,
       },
       events: {
         onReady: (event) => {
-          const state = typeof event.target.getPlayerState === "function" ? event.target.getPlayerState() : 5;
-          marcarYouTube(state);
           if (pendingSeek == null) return;
           const seconds = pendingSeek;
           pendingSeek = null;
@@ -4128,7 +4120,6 @@ function mountYouTube(node) {
           event.target.playVideo();
         },
         onStateChange: (event) => {
-          marcarYouTube(event.data);
           if (event.data === 1 && Date.now() >= ignoreVideoPlayUntil) stopSpeech();
         },
         onError: () => {
@@ -4139,43 +4130,6 @@ function mountYouTube(node) {
       },
     });
   }).catch(() => {});
-}
-
-function marcarYouTube(state) {
-  const vista = document.querySelector(".yt-vista");
-  if (!vista) return;
-  const button = vista.querySelector(".yt-play");
-  const playing = state === 1 || state === 3;
-  vista.classList.toggle("yt-viendo", playing);
-  const ended = state === 0;
-  vista.classList.toggle("yt-fin", ended);
-  if (!button) return;
-  button.hidden = !ended;
-  if (ended) button.textContent = "Volver a ver";
-}
-
-function vistaEnPantalla(vista) {
-  const full = document.fullscreenElement || document.webkitFullscreenElement;
-  return Boolean(vista && full === vista);
-}
-
-function syncPantalla(vista) {
-  const button = vista && vista.querySelector(".yt-full");
-  if (!button) return;
-  const activo = vistaEnPantalla(vista);
-  button.textContent = activo ? "Salir" : "Pantalla completa";
-  button.setAttribute("aria-label", activo ? "Salir de pantalla completa" : "Pantalla completa");
-}
-
-function alternarPantalla(vista) {
-  if (!vista) return;
-  if (vistaEnPantalla(vista)) {
-    const exit = document.exitFullscreen || document.webkitExitFullscreen;
-    if (exit) exit.call(document);
-    return;
-  }
-  const ask = vista.requestFullscreen || vista.webkitRequestFullscreen;
-  if (ask) ask.call(vista);
 }
 
 function pauseClassVideo() {
@@ -4257,27 +4211,6 @@ async function ask(question) {
     messages.scrollTop = messages.scrollHeight;
   }
 }
-
-document.addEventListener("click", (event) => {
-  const replay = event.target.closest(".yt-play");
-  if (replay) {
-    event.preventDefault();
-    if (ytPlayer && typeof ytPlayer.seekTo === "function") ytPlayer.seekTo(0, true);
-    if (ytPlayer && typeof ytPlayer.playVideo === "function") ytPlayer.playVideo();
-    return;
-  }
-  const full = event.target.closest(".yt-full");
-  if (!full) return;
-  event.preventDefault();
-  alternarPantalla(full.closest(".yt-vista"));
-});
-
-document.addEventListener("fullscreenchange", () => {
-  document.querySelectorAll(".yt-vista").forEach(syncPantalla);
-});
-document.addEventListener("webkitfullscreenchange", () => {
-  document.querySelectorAll(".yt-vista").forEach(syncPantalla);
-});
 
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".player-hide");
