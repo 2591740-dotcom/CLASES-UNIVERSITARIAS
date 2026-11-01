@@ -1611,6 +1611,18 @@ function stepsHtml(job) {
   }).join("");
 }
 
+function preparaEnFondo() {
+  const cap = window.Capacitor;
+  return Boolean(
+    cap
+    && typeof cap.isNativePlatform === "function"
+    && cap.isNativePlatform()
+    && cap.Plugins
+    && cap.Plugins.ClaseClaraPreparar
+    && typeof cap.Plugins.ClaseClaraPreparar.empezar === "function"
+  );
+}
+
 function processHtml(job) {
   const actions = job.id
     ? `<button class="primary" id="retry" type="button">Reintentar</button>
@@ -1630,7 +1642,9 @@ function processHtml(job) {
       ${youtube}
       <ul class="steps" id="steps">${stepsHtml(job)}</ul>
       ${error}
-      <p class="note">${window.claseClaraCloud
+      <p class="note">${preparaEnFondo()
+        ? "Se prepara en este aparato. Puedes salir de la aplicación o apagar la pantalla: sigue en segundo plano. Si cierras la aplicación, se corta."
+        : window.claseClaraCloud
         ? "Se prepara en este aparato y el video se sube a YouTube desde aquí. Deja esta pantalla abierta. Una clase de una hora puede tardar varios minutos."
         : "Una clase de una hora suele tardar unos minutos. Puedes dejar esta página abierta."}</p>
     </section>`;

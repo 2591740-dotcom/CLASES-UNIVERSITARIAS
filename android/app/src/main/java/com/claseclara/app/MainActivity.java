@@ -15,6 +15,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(SpeechPlugin.class);
         registerPlugin(YouTubePlugin.class);
+        registerPlugin(PreparePlugin.class);
         super.onCreate(savedInstanceState);
         if (getBridge() == null || getBridge().getWebView() == null) return;
         WebView webView = getBridge().getWebView();
@@ -46,6 +47,16 @@ public class MainActivity extends BridgeActivity {
                 );
             }
         });
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        if (!PrepareService.activo()) return;
+        WebView view = getBridge() != null ? getBridge().getWebView() : null;
+        if (view == null) return;
+        view.onResume();
+        view.resumeTimers();
     }
 
     private void leaveApp(OnBackPressedCallback callback) {

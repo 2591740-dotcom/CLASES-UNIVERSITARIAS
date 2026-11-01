@@ -1795,19 +1795,41 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     }
   }
 
+  function pluginPreparar() {
+    const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.ClaseClaraPreparar;
+    if (!plugin || !native || typeof plugin.empezar !== "function") return null;
+    return plugin;
+  }
+
+  function avisarFondo(servicio, detalle, ya) {
+    if (!servicio) return ya;
+    const texto = String(detalle || "Preparando la clase").slice(0, 120);
+    try {
+      const job = ya && typeof servicio.aviso === "function"
+        ? servicio.aviso({ detalle: texto })
+        : servicio.empezar({ detalle: texto });
+      if (job && typeof job.catch === "function") job.catch(() => {});
+    } catch { /* el aviso del sistema es opcional */ }
+    return true;
+  }
+
   async function prepararEnEsteAparato(id, extra) {
     if (!id || preparando.has(id)) return;
     preparando.add(id);
+    const servicio = pluginPreparar();
+    let fondoListo = false;
     let ultimo = "";
     const say = async (detalle) => {
       if (!detalle || detalle === ultimo) return;
       ultimo = detalle;
+      fondoListo = avisarFondo(servicio, detalle, fondoListo);
       if (extra && extra.onProgress) extra.onProgress(detalle);
       try {
         await rest("PATCH", `/rest/v1/clases?id=eq.${id}`, { estado: "procesando", detalle });
       } catch { /* la pantalla de este aparato sigue */ }
     };
     try {
+      fondoListo = avisarFondo(servicio, "Preparando la clase", fondoListo);
       const ia = await loadIa();
       if (!ia || !ia.chat_key) throw new Error("Pega la clave en Configurar.");
       const sttChoice = ia.stt_provider && ia.stt_provider !== "same" ? ia.stt_provider : "";
@@ -1900,6 +1922,12 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       } catch { /* el aviso queda en esta pantalla */ }
     } finally {
       preparando.delete(id);
+      if (servicio && fondoListo && preparando.size === 0 && typeof servicio.terminar === "function") {
+        try {
+          const job = servicio.terminar();
+          if (job && typeof job.catch === "function") job.catch(() => {});
+        } catch { /* el aviso ya se cerró */ }
+      }
     }
   }
 
