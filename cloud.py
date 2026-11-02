@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import html
+import ipaddress
 import json
 import re
 import time
@@ -18,6 +21,14 @@ CRED = ROOT / "data" / "supabase.json"
 CLASSES = ROOT / "data" / "classes"
 MAX_VIDEO = 2_500_000_000
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ClaseClara"
+_UA_PAGINA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+_MSG_CLAVE = "Esa grabación pide la clave corta de Zoom. La de Clementina no abre el video."
+_MSG_SIN_ARCHIVO = "Ese enlace no entregó el video. La página de Zoom no trae el archivo."
+_MSG_PAGINA = "Zoom mostró la página de la grabación y no el video."
 
 
 def configured() -> bool:
@@ -45,25 +56,404 @@ def assert_zoom_url(url: str) -> str:
     return text
 
 
-def download(url: str, dest: Path) -> None:
-    target = playback_url(url)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(target, headers={"User-Agent": USER_AGENT})
+def _host_publico(host: str) -> bool:
+    name = (host or "").lower().rstrip(".")
+    if not name or name == "localhost" or name.endswith(".local"):
+        return False
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            kind = (response.headers.get("Content-Type") or "").lower()
-            if "text/html" in kind:
-                raise engine.AppError("Ese enlace no entregó el video. Tiene que abrir la grabación sin clave.")
-            total = 0
-            with dest.open("wb") as handle:
-                while True:
-                    chunk = response.read(1024 * 256)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_VIDEO:
-                        raise engine.AppError("Ese video pasa de 2.5 GB.")
-                    handle.write(chunk)
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return True
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+    )
+
+
+class _SoloHttps(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        absoluto = urllib.parse.urljoin(req.full_url, newurl)
+        parts = urllib.parse.urlsplit(absoluto)
+        if parts.scheme != "https" or not _host_publico(parts.hostname or ""):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener_zoom():
+    return urllib.request.build_opener(
+        _SoloHttps,
+        urllib.request.HTTPCookieProcessor,
+    )
+
+
+def _origen(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def _cabeceras(referer: str, pagina: bool, agente: str) -> dict[str, str]:
+    headers = {
+        "User-Agent": agente,
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8" if pagina else "*/*",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
+def _cabeza_pagina(head: bytes) -> bool:
+    sample = head.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return (
+        sample.startswith(b"<!doctype")
+        or sample.startswith(b"<html")
+        or sample.startswith(b"<head")
+        or sample.startswith(b"<script")
+        or sample.startswith(b"<form")
+        or sample.startswith(b"{")
+        or sample.startswith(b"[")
+    )
+
+
+def _respuesta_pagina(kind: str, first: bytes) -> bool:
+    if not first:
+        return True
+    lowered = (kind or "").lower()
+    if "text/html" in lowered or "application/json" in lowered or "text/json" in lowered:
+        return True
+    return _cabeza_pagina(first)
+
+
+def _si_gzip(raw: bytes, headers) -> bytes:
+    encoding = (headers.get("Content-Encoding") or "").lower()
+    if "gzip" in encoding or raw[:2] == b"\x1f\x8b":
+        try:
+            return gzip.decompress(raw)
+        except OSError:
+            return raw
+    return raw
+
+
+def _guardar_video(opener, url: str, dest: Path, referer: str, agente: str) -> bool:
+    request = urllib.request.Request(url, headers=_cabeceras(referer, False, agente))
+    with opener.open(request, timeout=60) as response:
+        kind = response.headers.get("Content-Type") or ""
+        first = response.read(64 * 1024)
+        if _respuesta_pagina(kind, first):
+            return False
+        total = 0
+        pending = first
+        with dest.open("wb") as handle:
+            while pending:
+                total += len(pending)
+                if total > MAX_VIDEO:
+                    raise engine.AppError("Ese video pasa de 2.5 GB.")
+                handle.write(pending)
+                pending = response.read(1024 * 256)
+    return dest.is_file() and dest.stat().st_size > 0
+
+
+def _visible(texto: str) -> str:
+    sin_notas = re.sub(r"(?is)<!--.*?-->", " ", str(texto or ""))
+    return re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", sin_notas)
+
+
+def _pide_clave_zoom(texto: str) -> bool:
+    return re.search(
+        r"(?is)<form\b[^>]*\b(?:id|name)\s*=\s*['\"]password_form['\"]",
+        _visible(texto),
+    ) is not None
+
+
+def _id_seguro(value: str) -> bool:
+    return re.fullmatch(r"[A-Za-z0-9_.+\-=~]{1,500}", value or "") is not None
+
+
+def _bloque_llaves(texto: str) -> str:
+    depth = 0
+    quote = ""
+    escape = False
+    for index, char in enumerate(texto):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return texto[: index + 1]
+    return ""
+
+
+def _leer_cadena(texto: str, index: int) -> tuple[str, int]:
+    quote = texto[index]
+    index += 1
+    chars: list[str] = []
+    while index < len(texto):
+        char = texto[index]
+        if char == "\\":
+            if index + 1 >= len(texto):
+                break
+            nxt = texto[index + 1]
+            mapping = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "'": "'", '"': '"', "/": "/"}
+            if nxt in mapping:
+                chars.append(mapping[nxt])
+                index += 2
+                continue
+            if nxt == "u" and index + 5 < len(texto):
+                try:
+                    chars.append(chr(int(texto[index + 2:index + 6], 16)))
+                except ValueError:
+                    chars.append(nxt)
+                    index += 2
+                    continue
+                index += 6
+                continue
+            chars.append(nxt)
+            index += 2
+            continue
+        if char == quote:
+            return "".join(chars), index + 1
+        chars.append(char)
+        index += 1
+    return "", index
+
+
+def _cargar_objeto(raw: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _objeto_desde_parse(rest: str) -> dict:
+    abre = rest.find("(")
+    if abre < 0:
+        return {}
+    index = abre + 1
+    while index < len(rest) and rest[index].isspace():
+        index += 1
+    if index >= len(rest) or rest[index] not in "'\"":
+        return {}
+    literal, _fin = _leer_cadena(rest, index)
+    return _cargar_objeto(literal)
+
+
+def _objeto_data(texto: str) -> dict:
+    match = re.search(r"window\.__data__\s*=\s*", texto)
+    if not match:
+        return {}
+    rest = texto[match.end():].lstrip()
+    if rest.startswith("JSON.parse"):
+        data = _objeto_desde_parse(rest)
+    elif rest.startswith("{"):
+        data = _cargar_objeto(_bloque_llaves(rest))
+    else:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _buscar_id(data: object, clave: str, depth: int = 0) -> str:
+    if depth > 6 or not isinstance(data, dict):
+        return ""
+    value = data.get(clave)
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        text = str(value).strip()
+        if text:
+            return text
+    for child in data.values():
+        found = _buscar_id(child, clave, depth + 1)
+        if found:
+            return found
+    return ""
+
+
+def _id_en_texto(texto: str, clave: str) -> str:
+    match = re.search(rf"\b{re.escape(clave)}\b\s*:\s*['\"]([^'\"]+)['\"]", texto)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    return value if _id_seguro(value) else ""
+
+
+def _datos_reproductor(texto: str) -> dict[str, str]:
+    limpio = html.unescape(str(texto or "")).lstrip("\ufeff")
+    data = _objeto_data(limpio)
+    salida: dict[str, str] = {}
+    for clave in ("fileId", "meetingId"):
+        value = _buscar_id(data, clave)
+        if not _id_seguro(value):
+            value = _id_en_texto(limpio, clave)
+        if _id_seguro(value):
+            salida[clave] = value
+    return salida
+
+
+def _como_texto(valor: object) -> str:
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, (bytes, bytearray)):
+        return bytes(valor).decode("utf-8", errors="replace")
+    return ""
+
+
+def _como_dict(valor: object) -> dict:
+    if isinstance(valor, dict):
+        return valor
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto.startswith("{") and not texto.startswith("["):
+            return {}
+        try:
+            parsed = json.loads(texto)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _interpretar(texto: str):
+    limpio = texto.lstrip("\ufeff \t\r\n")
+    if limpio.startswith("{") or limpio.startswith("["):
+        try:
+            return json.loads(limpio)
+        except json.JSONDecodeError:
+            return texto
+    return texto
+
+
+def _url_reproductor(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    if "/rec/download/" not in parts.path:
+        return url
+    path = parts.path.replace("/rec/download/", "/rec/play/", 1)
+    return urllib.parse.urlunsplit(parts._replace(path=path))
+
+
+def _url_play_seguro(redirect: str, base: str) -> str:
+    if not redirect:
+        return ""
+    absoluto = urllib.parse.urljoin(base, redirect.strip())
+    parts = urllib.parse.urlsplit(absoluto)
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not host.endswith("zoom.us") or not _host_publico(host):
+        return ""
+    if "/rec/play/" not in parts.path and "/rec/share/" not in parts.path:
+        return ""
+    if len(absoluto) > 2000:
+        return ""
+    return absoluto
+
+
+def _url_media(url: str, base: str) -> str:
+    text = " ".join(str(url or "").split())
+    if not text:
+        return ""
+    absoluto = urllib.parse.urljoin(base, text)
+    parts = urllib.parse.urlsplit(absoluto)
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or parts.username or parts.password or not _host_publico(host):
+        return ""
+    if len(absoluto) > 16000:
+        return ""
+    return absoluto
+
+
+def _elegir_mp4(info: dict, base: str) -> str:
+    result = info.get("result") if isinstance(info, dict) else None
+    bolsa = result if isinstance(result, dict) else (info if isinstance(info, dict) else {})
+    for clave in ("viewMp4WithshareUrl", "viewMp4Url", "shareMp4Url"):
+        media = _url_media(str(bolsa.get(clave) or ""), base)
+        if media:
+            return media
+    return ""
+
+
+def _exigir_sin_clave(texto: str) -> None:
+    if _pide_clave_zoom(texto):
+        raise engine.AppError(_MSG_CLAVE)
+
+
+# La página del reproductor no es una clave. El mp4 sale de play/info.
+def _resolver_grabacion(url: str, pedir) -> str:
+    cleaned = assert_zoom_url(url)
+    pagina = _url_reproductor(cleaned)
+    continuo = False
+    html_pagina = _como_texto(pedir(pagina))
+    _exigir_sin_clave(html_pagina)
+    if "/rec/share/" in urllib.parse.urlsplit(pagina).path:
+        meeting = _datos_reproductor(html_pagina).get("meetingId") or ""
+        if not meeting:
+            raise engine.AppError(_MSG_SIN_ARCHIVO)
+        base = _origen(pagina)
+        info = _como_dict(pedir(base + "nws/recording/1.0/play/share-info/" + urllib.parse.quote(meeting, safe="")))
+        result = info.get("result") if isinstance(info.get("result"), dict) else {}
+        play = _url_play_seguro(str(result.get("redirectUrl") or ""), base)
+        if not play:
+            raise engine.AppError(_MSG_SIN_ARCHIVO)
+        html_pagina = _como_texto(pedir(play))
+        _exigir_sin_clave(html_pagina)
+        pagina = play
+        continuo = True
+    file_id = _datos_reproductor(html_pagina).get("fileId") or ""
+    if not file_id:
+        raise engine.AppError(_MSG_SIN_ARCHIVO)
+    base = _origen(pagina)
+    consulta = "?continueMode=true" if continuo else ""
+    info = _como_dict(pedir(
+        base + "nws/recording/1.0/play/info/" + urllib.parse.quote(file_id, safe="") + consulta
+    ))
+    media = _elegir_mp4(info, base)
+    if not media:
+        raise engine.AppError(_MSG_PAGINA)
+    return media
+
+
+def _pedir_zoom(opener, origen: str):
+    def pedir(url: str):
+        request = urllib.request.Request(url, headers=_cabeceras(origen, True, _UA_PAGINA))
+        with opener.open(request, timeout=60) as response:
+            raw = _si_gzip(response.read(4_000_000), response.headers)
+            charset = "utf-8"
+            getter = getattr(response.headers, "get_content_charset", None)
+            if callable(getter):
+                charset = getter() or "utf-8"
+            text = raw.decode(charset, errors="replace")
+        return _interpretar(text)
+
+    return pedir
+
+
+def _bajar_zoom(url: str, dest: Path, opener) -> None:
+    cleaned = assert_zoom_url(url)
+    target = playback_url(cleaned)
+    dest.unlink(missing_ok=True)
+    try:
+        try:
+            listo = _guardar_video(opener, target, dest, _origen(cleaned), USER_AGENT)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            listo = False
+        if not listo:
+            print("[ClaseClara] Zoom entregó la página. Busco el video.", flush=True)
+            media = _resolver_grabacion(cleaned, _pedir_zoom(opener, _origen(cleaned)))
+            listo = _guardar_video(opener, media, dest, _origen(cleaned), _UA_PAGINA)
+        if not listo:
+            raise engine.AppError(_MSG_PAGINA)
     except engine.AppError:
         dest.unlink(missing_ok=True)
         raise
@@ -73,10 +463,16 @@ def download(url: str, dest: Path) -> None:
     if not dest.is_file() or dest.stat().st_size < 100_000:
         dest.unlink(missing_ok=True)
         raise engine.AppError("El enlace no devolvió un video completo.")
-    head = dest.read_bytes()[:80].lower()
-    if head.startswith(b"<!doctype") or head.startswith(b"<html") or head.startswith(b"{"):
+    head = dest.read_bytes()[:80]
+    if _cabeza_pagina(head):
         dest.unlink(missing_ok=True)
-        raise engine.AppError("Ese enlace no entregó el video. Tiene que abrir la grabación sin clave.")
+        raise engine.AppError(_MSG_PAGINA)
+
+
+def download(url: str, dest: Path) -> None:
+    cleaned = assert_zoom_url(url)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _bajar_zoom(cleaned, dest, _opener_zoom())
 
 
 def _marca(value: object) -> int:
@@ -158,6 +554,13 @@ def publish(class_id: str) -> None:
     if not isinstance(chat, list):
         chat = []
     curso = _curso_id(meta.get("curso_id") or "")
+    fijado = curso_fijado(meta)
+    if fijado and fijado != curso:
+        meta["curso_id"] = fijado
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        curso = fijado
+    elif fijado:
+        curso = fijado
     remote_url = ""
     remote_estudio: dict = {}
     remote_title = ""
@@ -225,6 +628,38 @@ def publish(class_id: str) -> None:
     else:
         estudio.pop("titulo_custom", None)
         estudio.pop("titulo_en", None)
+    propias = presentaciones_limpias(meta.get("presentaciones"))
+    if not propias:
+        propias = presentaciones_limpias(estudio.get("presentaciones"))
+    if not propias:
+        propias = presentaciones_limpias(remote_estudio.get("presentaciones"))
+    if propias:
+        estudio["presentaciones"] = propias
+    else:
+        estudio.pop("presentaciones", None)
+    lecturas = unir_lecturas(
+        meta.get("lecturas") or estudio.get("lecturas"),
+        remote_estudio.get("lecturas"),
+    )
+    if lecturas:
+        estudio["lecturas"] = lecturas
+    else:
+        estudio.pop("lecturas", None)
+    profesor = profesor_limpio(meta.get("profesor")) or profesor_limpio(estudio.get("profesor"))
+    if not profesor:
+        profesor = profesor_limpio(remote_estudio.get("profesor"))
+    if profesor:
+        estudio["profesor"] = profesor
+    else:
+        estudio.pop("profesor", None)
+    if study_path.is_file():
+        guardado = False
+        for clave in ("hora_clase", "profesor", "lecturas", "presentaciones", "fecha_clase"):
+            if clave in estudio and study.get(clave) != estudio[clave] and estudio[clave] not in ("", None, []):
+                study[clave] = estudio[clave]
+                guardado = True
+        if guardado:
+            study_path.write_text(json.dumps(study, ensure_ascii=False, indent=2), encoding="utf-8")
     remote_fuentes = remote_estudio.get("fuentes") if isinstance(remote_estudio.get("fuentes"), list) else []
     claves = fuentes_de_meta(meta)
     publicas = limpiar_fuentes([*claves, *remote_fuentes], publicas=True)
@@ -486,6 +921,164 @@ def filas_fuentes() -> list:
         return []
     rows = _request("GET", "/rest/v1/clases?select=id,titulo,video_url,estudio,estado,creado")
     return rows if isinstance(rows, list) else []
+
+
+def url_sin_token(url: str) -> str:
+    """Enlace https. En uvcv.edu.pe el archivo directo queda sin el token."""
+    text = str(url or "").strip()
+    if not text.startswith("https://") or len(text) > 800:
+        return ""
+    parts = urllib.parse.urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if not host:
+        return ""
+    path = parts.path
+    query = parts.query
+    if host == "uvcv.edu.pe" or host.endswith(".uvcv.edu.pe"):
+        path = path.replace("/webservice/pluginfile.php/", "/pluginfile.php/")
+        if "/pluginfile.php/" in path:
+            query = ""
+    cleaned = urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, ""))
+    return cleaned if cleaned.startswith("https://") and len(cleaned) <= 800 else ""
+
+
+def _es_zoom(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host == "zoom.us" or host.endswith(".zoom.us")
+
+
+def _archivos_limpios(value, fallback: str) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    salida: list[dict] = []
+    vistos: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        url = url_sin_token(item.get("url") or "")
+        if not url or _es_zoom(url) or url in vistos:
+            continue
+        vistos.add(url)
+        nombre = " ".join(str(item.get("nombre") or "").split())[:160] or fallback
+        salida.append({"nombre": nombre, "url": url})
+        if len(salida) >= 6:
+            break
+    return salida
+
+
+_NO_LECTURA = re.compile(
+    r"(?i)(?:\.(?:pptx?|ppsx?)(?:$|[?#])|\b(?:pptx?|ppsx?|diapositivas?|presentaci[oó]n(?:es)?)\b)"
+)
+
+
+def presentaciones_limpias(value) -> list[dict]:
+    """Archivos de la sesión en Clementina. El enlace de Zoom no entra aquí."""
+    return _archivos_limpios(value, "Presentación")
+
+
+def lecturas_limpias(value) -> list[dict]:
+    """PDF, Word y enlaces de lectura. Zoom y presentaciones no entran."""
+    crudas = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            url = url_sin_token(item.get("url") or "")
+            nombre = " ".join(str(item.get("nombre") or "").split())
+            if not url or _es_zoom(url):
+                continue
+            if _NO_LECTURA.search(urllib.parse.unquote(url)) or _NO_LECTURA.search(nombre):
+                continue
+            crudas.append({"nombre": nombre, "url": url})
+    return _archivos_limpios(crudas, "Lectura")
+
+
+def profesor_limpio(value) -> str:
+    """Nombre que trajo Clementina. El aviso de que no hay profesor no se guarda."""
+    text = " ".join(str(value or "").split())
+    if not text or text.casefold() == "sin profesor visible":
+        return ""
+    return text[:160]
+
+
+def profesor_de_fuentes(meta, study, remoto) -> str:
+    """El nombre ya guardado. No inventa uno ni guarda el aviso vacío."""
+    fuentes = (
+        meta.get("profesor") if isinstance(meta, dict) else "",
+        study.get("profesor") if isinstance(study, dict) else "",
+        remoto.get("profesor") if isinstance(remoto, dict) else "",
+    )
+    for fuente in fuentes:
+        nombre = profesor_limpio(fuente)
+        if nombre:
+            return nombre
+    return ""
+
+
+_PORTADA_STOP = engine._TOPIC_STOP | {"sesion", "asincronica", "sincronica", "primer", "nombre", "plano"}
+_PORTADA_GENERICA = re.compile(
+    r"profesor|presentador|docente|bienvenida|participante|videollamada|"
+    r"\bzoom\b|camara|video apagado|video prendido|video activado|"
+    r"pantalla de inicio|pantalla inicial|pantalla negra|pantalla en blanco|"
+    r"pantalla sin |nombre del |nombre en pantalla|lista de asistencia|"
+    r"lista de grupos|inicio de la|fondo azul|logo |avatar"
+)
+
+
+def _titulo_portada(text: str) -> str:
+    folded = engine._fold(text)
+    folded = re.sub(r"^sesion\s+\d+\s*", "", folded)
+    return folded.replace("asincronica", " ").replace("sincronica", " ")
+
+
+def _palabras_portada(text: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[a-z0-9]{4,}", engine._fold(text))
+        if word not in _PORTADA_STOP
+    }
+
+
+def _portada_generica(text: str) -> bool:
+    return bool(_PORTADA_GENERICA.search(engine._fold(text)))
+
+
+def indice_portada(titulo: str, capturas) -> int:
+    """Captura, desde 1, cuyo texto habla del título. 0 si ninguna lo hace."""
+    buscadas = _palabras_portada(_titulo_portada(titulo))
+    if not buscadas or not isinstance(capturas, list):
+        return 0
+    mejor = 0
+    puntos = 0
+    for shot in capturas:
+        if not isinstance(shot, dict):
+            continue
+        try:
+            indice = int(shot.get("indice") or 0)
+        except (TypeError, ValueError):
+            continue
+        if indice < 1 or indice > 24:
+            continue
+        muestra = str(shot.get("que_muestra") or "")
+        score = engine._overlap(buscadas, _palabras_portada(muestra))
+        if score < 1:
+            continue
+        if score < 2 and _portada_generica(muestra):
+            continue
+        if score > puntos or (score == puntos and indice < mejor):
+            puntos = score
+            mejor = indice
+    return mejor
+
+
+def unir_lecturas(local, remoto) -> list[dict]:
+    salida = lecturas_limpias(local)
+    vistos = {item["url"] for item in salida}
+    for item in lecturas_limpias(remoto):
+        if item["url"] in vistos or len(salida) >= 6:
+            continue
+        salida.append(item)
+        vistos.add(item["url"])
+    return salida
 
 
 def guardar_fuentes(class_id: str, claves) -> None:
@@ -769,6 +1362,361 @@ def save_fecha(class_id: str, fecha: str, custom: bool) -> None:
     )
 
 
+def unir_presentaciones(local, remoto) -> list[dict]:
+    salida = presentaciones_limpias(local)
+    vistos = {item["url"] for item in salida}
+    for item in presentaciones_limpias(remoto):
+        if item["url"] in vistos or len(salida) >= 6:
+            continue
+        salida.append(item)
+        vistos.add(item["url"])
+    return salida
+
+
+def cambios_de_remoto(meta: dict, remote: dict, study_title: str = "") -> dict:
+    """Lo que la web o la APK cambiaron y esta PC todavía no tiene."""
+    if not isinstance(meta, dict) or not isinstance(remote, dict):
+        return {}
+    estudio = remote.get("estudio") if isinstance(remote.get("estudio"), dict) else {}
+    cambios: dict = {}
+    remote_title, remote_custom, remote_at = _titulo_remoto(remote)
+    chosen, chosen_custom, chosen_at = elegir_titulo(
+        str(meta.get("title") or ""),
+        bool(meta.get("title_custom")),
+        meta.get("titulo_en"),
+        study_title,
+        remote_title,
+        remote_custom,
+        remote_at,
+    )
+    if chosen and (
+        chosen != (meta.get("title") or "")
+        or bool(meta.get("title_custom")) != chosen_custom
+    ):
+        cambios["title"] = chosen
+        cambios["title_custom"] = chosen_custom
+        if chosen_custom:
+            cambios["titulo_en"] = chosen_at
+        elif "titulo_en" in meta:
+            cambios["titulo_en"] = None
+    remote_fecha = engine.fecha_iso(str(estudio.get("fecha_clase") or ""))
+    if estudio.get("fecha_custom") and remote_fecha and not meta.get("fecha_custom"):
+        cambios["fecha"] = remote_fecha
+        cambios["fecha_custom"] = True
+        cambios["fecha_origen"] = "edit"
+    remote_hora = engine.hora_valida(str(estudio.get("hora_clase") or ""))
+    local_hora = engine.hora_valida(str(meta.get("hora") or ""))
+    if remote_hora and not local_hora:
+        cambios["hora"] = remote_hora
+    elif remote_hora and estudio.get("fecha_custom") and not meta.get("fecha_custom"):
+        cambios["hora"] = remote_hora
+    local_curso = _curso_id(meta.get("curso_id") or "")
+    elegido = elegir_curso_id(local_curso, remote.get("curso_id") or "", curso_fijado(meta))
+    if elegido and elegido != local_curso:
+        cambios["curso_id"] = elegido
+    ppt = unir_presentaciones(meta.get("presentaciones"), estudio.get("presentaciones"))
+    if ppt != presentaciones_limpias(meta.get("presentaciones")):
+        cambios["presentaciones"] = ppt
+    visto = engine.youtube_url(str(remote.get("video_url") or ""))
+    if visto and not engine.youtube_url(str(meta.get("youtube_url") or "")):
+        cambios["youtube_url"] = visto
+    return cambios
+
+
+def es_de_esta_pc(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    uni = " ".join(str(row.get("universidad") or "").split())
+    carrera = " ".join(str(row.get("carrera") or "").split())
+    if uni and uni != PC_UNIVERSIDAD:
+        return False
+    if carrera and carrera != PC_CARRERA:
+        return False
+    return True
+
+
+_VISTA = (
+    "id,titulo,materia,curso_id,video_url,duracion,estado,detalle,creado,universidad,carrera,"
+    "estudio_titulo:estudio->titulo,"
+    "estudio_custom:estudio->titulo_custom,"
+    "estudio_en:estudio->titulo_en,"
+    "estudio_fecha:estudio->fecha_clase,"
+    "estudio_fecha_custom:estudio->fecha_custom,"
+    "estudio_hora:estudio->hora_clase,"
+    "estudio_profesor:estudio->profesor,"
+    "estudio_ppt:estudio->presentaciones,"
+    "estudio_avisos:estudio->avisos"
+)
+
+
+def _fila_ligera(row: dict) -> dict:
+    ppt = row.get("estudio_ppt")
+    avisos = row.get("estudio_avisos")
+    return {
+        "id": row.get("id"),
+        "titulo": row.get("titulo") or "",
+        "materia": row.get("materia") or "",
+        "curso_id": row.get("curso_id") or "",
+        "video_url": row.get("video_url") or "",
+        "duracion": row.get("duracion") or 0,
+        "estado": row.get("estado") or "",
+        "detalle": row.get("detalle") or "",
+        "creado": row.get("creado") or "",
+        "universidad": row.get("universidad") or "",
+        "carrera": row.get("carrera") or "",
+        "estudio": {
+            "titulo": row.get("estudio_titulo") or "",
+            "titulo_custom": bool(row.get("estudio_custom")),
+            "titulo_en": row.get("estudio_en") or 0,
+            "fecha_clase": row.get("estudio_fecha") or "",
+            "fecha_custom": bool(row.get("estudio_fecha_custom")),
+            "hora_clase": row.get("estudio_hora") or "",
+            "profesor": profesor_limpio(row.get("estudio_profesor")),
+            "presentaciones": ppt if isinstance(ppt, list) else [],
+            "avisos": avisos if isinstance(avisos, list) else [],
+        },
+    }
+
+
+def _pedir_vista(extra: str = "") -> list:
+    if not configured():
+        return []
+    select = urllib.parse.quote(_VISTA, safe=",:")
+    rows = _request("GET", f"/rest/v1/clases?select={select}{extra}")
+    if not isinstance(rows, list):
+        return []
+    return [_fila_ligera(row) for row in rows if isinstance(row, dict)]
+
+
+def filas_vista() -> list:
+    return _pedir_vista()
+
+
+def leer_estado(class_id: str) -> dict | None:
+    if not configured() or not _valid_id(class_id):
+        return None
+    rows = _pedir_vista(f"&id=eq.{urllib.parse.quote(class_id)}")
+    return rows[0] if rows else None
+
+
+def leer_clase(class_id: str) -> dict | None:
+    if not configured() or not _valid_id(class_id):
+        return None
+    rows = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}"
+        "&select=id,titulo,materia,curso_id,video_url,duracion,estado,detalle,creado,universidad,carrera,estudio,transcripcion,chat",
+    )
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        return rows[0]
+    return None
+
+
+def diapositivas_de(class_id: str) -> list:
+    if not configured() or not _valid_id(class_id):
+        return []
+    rows = _request(
+        "GET",
+        f"/rest/v1/diapositivas?clase_id=eq.{urllib.parse.quote(class_id)}"
+        "&select=orden,tiempo,imagen_path&order=orden.asc",
+    )
+    return rows if isinstance(rows, list) else []
+
+
+def firmar_imagen(path: str) -> str:
+    data = _cred()
+    root = str(data.get("url") or "").rstrip("/")
+    key = str(data.get("service_role") or "")
+    name = str(path or "").strip().lstrip("/")
+    if not root or not key or not name or ".." in name:
+        return ""
+    target = root + "/storage/v1/object/sign/diapositivas/" + urllib.parse.quote(name, safe="/")
+    payload = json.dumps({"expiresIn": 3600}).encode("utf-8")
+    request = urllib.request.Request(
+        target,
+        data=payload,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read().decode("utf-8") or "{}")
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return ""
+    signed = ""
+    if isinstance(body, dict):
+        signed = str(body.get("signedURL") or body.get("signedUrl") or "")
+    if not signed:
+        return ""
+    if signed.startswith("http"):
+        return signed
+    return root + "/storage/v1" + signed
+
+
+def marcos_firmados(class_id: str) -> list[dict]:
+    try:
+        slides = diapositivas_de(class_id)
+    except engine.AppError:
+        return []
+    frames = []
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        url = firmar_imagen(str(slide.get("imagen_path") or ""))
+        if not url:
+            continue
+        try:
+            tiempo = float(slide.get("tiempo") or 0)
+        except (TypeError, ValueError):
+            tiempo = 0
+        frames.append({"file": url, "time": tiempo})
+    return frames
+
+
+def orden_limpio(data) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    salida = {}
+    for key, ids in data.items():
+        if not isinstance(ids, list):
+            continue
+        clean = []
+        for item in ids:
+            text = str(item or "")
+            if _valid_id(text) and text not in clean:
+                clean.append(text)
+            if len(clean) >= 200:
+                break
+        if clean and str(key):
+            salida[str(key)] = clean
+    return salida
+
+
+def leer_orden() -> dict:
+    if not configured():
+        return {}
+    data = _cred()
+    root = str(data.get("url") or "").rstrip("/")
+    key = str(data.get("service_role") or "")
+    if not root or not key:
+        return {}
+    target = root + "/storage/v1/object/diapositivas/" + urllib.parse.quote("ajustes/orden.json", safe="/")
+    request = urllib.request.Request(target, headers={"apikey": key, "Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code in {400, 404}:
+            return {}
+        return {}
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return {}
+    return orden_limpio(raw)
+
+
+_AJUSTES_TURNO = {"linkeo-turno.json", "linkeo-lectura.json"}
+
+
+def _ajuste_turno(nombre: str) -> str:
+    if nombre not in _AJUSTES_TURNO:
+        raise engine.AppError("No guardo ese ajuste.")
+    return "ajustes/" + nombre
+
+
+def leer_ajuste(nombre: str):
+    """JSON privado del turno. No incluye la contraseña."""
+    if not configured():
+        return None
+    try:
+        raw = _download_object(_ajuste_turno(nombre))
+    except engine.AppError:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def guardar_ajuste(nombre: str, data: dict) -> None:
+    if not configured() or not isinstance(data, dict):
+        return
+    _request(
+        "POST",
+        "/storage/v1/object/diapositivas/" + urllib.parse.quote(_ajuste_turno(nombre), safe="/"),
+        json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        content_type="application/octet-stream",
+        extra={"x-upsert": "true"},
+    )
+
+
+def borrar_ajuste(nombre: str) -> None:
+    if not configured():
+        return
+    try:
+        _request(
+            "DELETE",
+            "/storage/v1/object/diapositivas",
+            {"prefixes": [_ajuste_turno(nombre)]},
+            prefer="return=minimal",
+        )
+    except engine.AppError:
+        return
+
+
+def guardar_orden_curso(curso_id: str, ids) -> dict:
+    curso = _curso_id(curso_id)
+    if not curso:
+        raise engine.AppError("Elige un curso antes de ordenar las clases.")
+    clean = []
+    for item in ids or []:
+        text = str(item or "")
+        if _valid_id(text) and text not in clean:
+            clean.append(text)
+        if len(clean) >= 200:
+            break
+    actual = leer_orden()
+    actual[curso] = clean
+    _request(
+        "POST",
+        "/storage/v1/object/diapositivas/" + urllib.parse.quote("ajustes/orden.json", safe="/"),
+        json.dumps(actual, ensure_ascii=False).encode("utf-8"),
+        content_type="application/octet-stream",
+        extra={"x-upsert": "true"},
+    )
+    return actual
+
+
+def guardar_titulo(class_id: str, title: str, materia: str) -> None:
+    cleaned = " ".join(str(title or "").split())[:140]
+    if not configured() or not _valid_id(class_id) or not cleaned:
+        return
+    remote = _request(
+        "GET",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}&select=estudio",
+    )
+    estudio: dict = {}
+    if isinstance(remote, list) and remote and isinstance(remote[0].get("estudio"), dict):
+        estudio = dict(remote[0]["estudio"])
+    estudio["titulo"] = cleaned
+    estudio["titulo_custom"] = True
+    estudio["titulo_en"] = int(time.time())
+    _request(
+        "PATCH",
+        f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}",
+        {
+            "titulo": cleaned,
+            "materia": " ".join(str(materia or "").split())[:120],
+            "estudio": estudio,
+        },
+        prefer="return=minimal",
+    )
+
+
 def save_hora(class_id: str, hora: str) -> None:
     clock = engine.hora_valida(hora)
     if not configured() or not _valid_id(class_id) or not clock:
@@ -920,7 +1868,34 @@ def _curso_id(value: str) -> str:
     return ""
 
 
+def nombre_clave(nombre: str) -> str:
+    return " ".join(str(nombre or "").split()).casefold()
+
+
+def elegir_curso_id(local: str, remoto: str, fijado: str = "") -> str:
+    fijo = _curso_id(fijado)
+    if fijo:
+        return fijo
+    lejos = _curso_id(remoto)
+    if lejos:
+        return lejos
+    return _curso_id(local)
+
+
+_cursos_cache: list | None = None
+_cursos_en = 0.0
+
+
+def _olvidar_cursos() -> None:
+    global _cursos_cache
+    _cursos_cache = None
+
+
 def list_cursos() -> list[dict]:
+    global _cursos_cache, _cursos_en
+    ahora = time.monotonic()
+    if _cursos_cache is not None and ahora - _cursos_en < 4:
+        return _cursos_cache
     if not configured():
         return []
     uni = urllib.parse.quote(PC_UNIVERSIDAD)
@@ -929,7 +1904,44 @@ def list_cursos() -> list[dict]:
         "GET",
         f"/rest/v1/cursos?select=id,nombre,creado&universidad=eq.{uni}&carrera=eq.{carrera}&order=creado.asc",
     )
-    return rows if isinstance(rows, list) else []
+    salida = rows if isinstance(rows, list) else []
+    _cursos_cache = salida
+    _cursos_en = ahora
+    return salida
+
+
+def mapa_cursos(filas) -> dict[str, str]:
+    salida: dict[str, str] = {}
+    if not isinstance(filas, list):
+        return salida
+    for row in filas:
+        if not isinstance(row, dict):
+            continue
+        clave = nombre_clave(row.get("nombre") or "")
+        curso = _curso_id(row.get("id") or "")
+        if clave and curso and clave not in salida:
+            salida[clave] = curso
+    return salida
+
+
+def curso_id_por_nombre(nombre: str, cursos: list | None = None) -> str:
+    clave = nombre_clave(nombre)
+    if not clave:
+        return ""
+    if cursos is None:
+        try:
+            filas = list_cursos()
+        except engine.AppError:
+            return ""
+    else:
+        filas = cursos
+    return mapa_cursos(filas).get(clave, "")
+
+
+def curso_fijado(meta: dict) -> str:
+    if not isinstance(meta, dict) or not meta.get("materia_custom"):
+        return ""
+    return curso_id_por_nombre(str(meta.get("materia") or ""))
 
 
 def curso_por_clase() -> dict[str, str]:
@@ -956,6 +1968,7 @@ def _nombre_curso(nombre: str) -> str:
 
 def crear_curso(nombre: str) -> dict:
     limpio = _nombre_curso(nombre)
+    _olvidar_cursos()
     try:
         _request(
             "POST",
@@ -967,6 +1980,7 @@ def crear_curso(nombre: str) -> dict:
         if "23505" in str(exc) or "duplicate" in str(exc).lower():
             raise engine.AppError("Ya hay un curso con ese nombre.") from exc
         raise
+    _olvidar_cursos()
     creado = next((row for row in list_cursos() if row.get("nombre") == limpio), None)
     if not isinstance(creado, dict):
         raise engine.AppError("No pude crear el curso.")
@@ -978,6 +1992,7 @@ def renombrar_curso(curso_id: str, nombre: str) -> dict:
     if not curso:
         raise engine.AppError("No encuentro ese curso.")
     limpio = _nombre_curso(nombre)
+    _olvidar_cursos()
     try:
         _request(
             "PATCH",
@@ -990,6 +2005,25 @@ def renombrar_curso(curso_id: str, nombre: str) -> dict:
             raise engine.AppError("Ya hay un curso con ese nombre.") from exc
         raise
     return {"id": curso, "nombre": limpio}
+
+
+def fechas_remotas() -> list[dict]:
+    if not configured():
+        return []
+    rows = _request("GET", "/rest/v1/clases?select=materia,curso_id,estudio")
+    if not isinstance(rows, list):
+        return []
+    salida = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        estudio = row.get("estudio") if isinstance(row.get("estudio"), dict) else {}
+        salida.append({
+            "materia": str(row.get("materia") or ""),
+            "curso_id": str(row.get("curso_id") or ""),
+            "fecha": str(estudio.get("fecha_clase") or ""),
+        })
+    return salida
 
 
 def asignar_curso(class_id: str, curso_id: str) -> None:
@@ -1085,6 +2119,54 @@ def self_test() -> None:
     assert elegir_titulo("Mio", True, 20, "Auto", "Editado", True, 10) == ("Mio", True, 20)
     assert elegir_titulo("Mio", True, 5, "Auto", "Editado", True, 10) == ("Editado", True, 10)
     assert elegir_titulo("Mio", True, 0, "Auto", "Otro", False, 0) == ("Mio", True, 0)
+    assert presentaciones_limpias([
+        {"nombre": "  Bases.pptx  ", "url": "https://uvcv.edu.pe/pluginfile.php/1/Bases.pptx"},
+        {"nombre": "Otra", "url": "https://uvcv.edu.pe/pluginfile.php/1/Bases.pptx"},
+        {"nombre": "Zoom", "url": "https://zoom.us/rec/play/abcTOKEN1.pptx"},
+        {"nombre": "Insegura", "url": "http://uvcv.edu.pe/a.pptx"},
+    ]) == [{"nombre": "Bases.pptx", "url": "https://uvcv.edu.pe/pluginfile.php/1/Bases.pptx"}]
+    assert presentaciones_limpias("no") == []
+    assert lecturas_limpias([
+        {
+            "nombre": "Lectura 4.pdf",
+            "url": "https://uvcv.edu.pe/webservice/pluginfile.php/99/mod_resource/content/1/lectura.pdf?token=secreto",
+        },
+        {"nombre": "Guía de lectura", "url": "https://ejemplo.com/guia"},
+        {"nombre": "Bases.pptx", "url": "https://uvcv.edu.pe/pluginfile.php/1/Bases.pptx"},
+        {"nombre": "Zoom", "url": "https://zoom.us/j/123"},
+    ]) == [
+        {
+            "nombre": "Lectura 4.pdf",
+            "url": "https://uvcv.edu.pe/pluginfile.php/99/mod_resource/content/1/lectura.pdf",
+        },
+        {"nombre": "Guía de lectura", "url": "https://ejemplo.com/guia"},
+    ]
+    assert profesor_limpio("  Ana   Pérez ") == "Ana Pérez"
+    assert profesor_limpio("Sin profesor visible") == ""
+    assert profesor_limpio("") == ""
+    assert profesor_de_fuentes({"profesor": ""}, {"profesor": "Sin profesor visible"}, {"profesor": "Ana Pérez"}) == "Ana Pérez"
+    assert profesor_de_fuentes({"profesor": "Luis Gómez"}, {"profesor": "Ana Pérez"}, {}) == "Luis Gómez"
+    assert indice_portada("Sesión 5 · Sistema nervioso autónomo", [
+        {"indice": 1, "que_muestra": "Pantalla con el nombre del profesor"},
+        {"indice": 2, "que_muestra": "Título: Sistema Nervioso Autónomo"},
+    ]) == 2
+    assert indice_portada("Sesión 13 · Bases biológicas de las praxias", [
+        {"indice": 1, "que_muestra": "Pantalla del profesor"},
+        {"indice": 3, "que_muestra": "Diagramas de la praxia"},
+    ]) == 3
+    assert indice_portada("Educación en salud", [
+        {"indice": 2, "que_muestra": "Profesor explicando modelos de educación para la salud"},
+    ]) == 2
+    assert indice_portada("Sesión 5 · Retroalimentación. Primer avance", [
+        {"indice": 1, "que_muestra": "Profesor en videoconferencia, primer plano"},
+    ]) == 0
+    assert indice_portada("Asesoría personalizada", [
+        {"indice": 1, "que_muestra": "Profesor solo en pantalla"},
+        {"indice": 7, "que_muestra": "Pantalla con un formulario"},
+    ]) == 0
+    assert indice_portada("", [{"indice": 1, "que_muestra": "Sistema nervioso"}]) == 0
+    assert _fila_ligera({"estudio_profesor": "  Ana   Pérez "})["estudio"]["profesor"] == "Ana Pérez"
+    assert _fila_ligera({"estudio_profesor": "Sin profesor visible"})["estudio"]["profesor"] == ""
     assert elegir_titulo("Archivo", False, 0, "Del modelo", "Archivo", False, 0) == ("Del modelo", False, 0)
     assert elegir_titulo("Mio", True, 10, "Auto", "", True, 30) == ("Mio", True, 10)
     assert _titulo_remoto({"titulo": "En la tarjeta", "estudio": {"titulo": "Del modelo"}}) == ("En la tarjeta", True, 0)
@@ -1092,3 +2174,292 @@ def self_test() -> None:
         "titulo": "Viejo",
         "estudio": {"titulo": "Nuevo", "titulo_custom": True, "titulo_en": 40},
     }) == ("Nuevo", True, 40)
+    local = {
+        "title": "Local",
+        "title_custom": False,
+        "fecha": "2026-01-01",
+        "fecha_custom": False,
+        "hora": "",
+        "curso_id": "",
+        "presentaciones": [{"nombre": "Local", "url": "https://uvcv.edu.pe/a.pptx"}],
+        "youtube_url": "",
+    }
+    curso = "11111111-1111-1111-1111-111111111111"
+    remote = {
+        "titulo": "Remoto",
+        "curso_id": curso,
+        "video_url": "https://youtu.be/dQw4w9WgXcQ",
+        "estudio": {
+            "titulo": "Remoto",
+            "titulo_custom": True,
+            "titulo_en": 50,
+            "fecha_clase": "2026-02-02",
+            "fecha_custom": True,
+            "hora_clase": "08:30",
+            "presentaciones": [{"nombre": "Nube", "url": "https://uvcv.edu.pe/b.pptx"}],
+        },
+    }
+    cambios = cambios_de_remoto(local, remote, "Del modelo")
+    assert cambios["title"] == "Remoto" and cambios["title_custom"] is True and cambios["titulo_en"] == 50
+    assert cambios["fecha"] == "2026-02-02" and cambios["fecha_custom"] is True
+    assert cambios["hora"] == "08:30"
+    assert cambios["curso_id"] == curso
+    assert cambios["youtube_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert [item["url"] for item in cambios["presentaciones"]] == [
+        "https://uvcv.edu.pe/a.pptx",
+        "https://uvcv.edu.pe/b.pptx",
+    ]
+    assert unir_presentaciones(local["presentaciones"], []) == [
+        {"nombre": "Local", "url": "https://uvcv.edu.pe/a.pptx"},
+    ]
+    propia = dict(local)
+    propia.update({
+        "title": "Mio",
+        "title_custom": True,
+        "titulo_en": 80,
+        "fecha": "2026-03-03",
+        "fecha_custom": True,
+        "hora": "09:00",
+        "curso_id": curso,
+        "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "presentaciones": [
+            {"nombre": "Local", "url": "https://uvcv.edu.pe/a.pptx"},
+            {"nombre": "Nube", "url": "https://uvcv.edu.pe/b.pptx"},
+        ],
+    })
+    assert cambios_de_remoto(propia, remote, "") == {}
+    bases_id = "7e0217b2-ae79-48e2-b2f1-a507c273aa91"
+    creatividad_id = "2fd013dc-1362-4115-a326-d5c0135452a9"
+    catalogo = [
+        {
+            "id": bases_id,
+            "nombre": "202602 - E-V02 - LIMA NORTE - PSICOLOGÍA - BASES BIOLOGICAS DEL COMPORTAMIENTO",
+        },
+        {
+            "id": creatividad_id,
+            "nombre": "202602 - E-V02 - LIMA NORTE - PSICOLOGÍA - CREATIVIDAD E INNOVACION - B9",
+        },
+    ]
+    assert nombre_clave("  A   B ") == "a b"
+    assert curso_id_por_nombre(catalogo[0]["nombre"], catalogo) == bases_id
+    assert curso_id_por_nombre("Estadística", catalogo) == ""
+    assert elegir_curso_id(creatividad_id, creatividad_id, bases_id) == bases_id
+    assert elegir_curso_id("", creatividad_id, "") == creatividad_id
+    assert elegir_curso_id(bases_id, "", "") == bases_id
+    assert elegir_curso_id("no", "no", "no") == ""
+    sin_fijo = {
+        "materia": catalogo[0]["nombre"],
+        "curso_id": bases_id,
+    }
+    lejos = {"curso_id": creatividad_id, "estudio": {}}
+    assert cambios_de_remoto(sin_fijo, lejos, "").get("curso_id") == creatividad_id
+    guardado_cursos = list_cursos
+    globals()["list_cursos"] = lambda: catalogo
+    try:
+        mal = {
+            "materia": catalogo[0]["nombre"],
+            "materia_custom": True,
+            "curso_id": creatividad_id,
+        }
+        assert cambios_de_remoto(mal, lejos, "").get("curso_id") == bases_id
+        bien = dict(mal)
+        bien["curso_id"] = bases_id
+        assert "curso_id" not in cambios_de_remoto(bien, lejos, "")
+        corta = {"materia": "Estadística", "materia_custom": True, "curso_id": ""}
+        assert cambios_de_remoto(corta, lejos, "").get("curso_id") == creatividad_id
+    finally:
+        globals()["list_cursos"] = guardado_cursos
+    assert orden_limpio({
+        "curso": ["20260101-120000-abcdef", "no", "20260101-120000-abcdef", "20260101-120001-abcdef"],
+        "": ["20260101-120000-abcdef"],
+        "otro": "no-lista",
+    }) == {"curso": ["20260101-120000-abcdef", "20260101-120001-abcdef"]}
+    assert es_de_esta_pc({"universidad": "", "carrera": ""})
+    assert es_de_esta_pc({"universidad": PC_UNIVERSIDAD, "carrera": PC_CARRERA})
+    assert not es_de_esta_pc({"universidad": "Otra", "carrera": PC_CARRERA})
+    assert not es_de_esta_pc({"universidad": PC_UNIVERSIDAD, "carrera": "Otra"})
+    assert not es_de_esta_pc("no")
+    base = "https://ucv-edu-pe.zoom.us/"
+    share = base + "rec/share/tokenShare"
+    play = base + "rec/play/tokenPlay"
+    html_share = '<html><script>window.__data__ = {"meetingId":"meet-1"};</script></html>'
+    html_play = '<html><script>window.__data__ = {"fileId":"file-1"};</script></html>'
+    rutas = {
+        share: html_share,
+        base + "nws/recording/1.0/play/share-info/meet-1": {
+            "result": {"redirectUrl": "/rec/play/tokenPlay"},
+        },
+        play: html_play,
+        base + "nws/recording/1.0/play/info/file-1?continueMode=true": {
+            "result": {
+                "shareMp4Url": "https://file.zoom.us/pantalla.mp4",
+                "viewMp4Url": "https://file.zoom.us/camara.mp4",
+                "viewMp4WithshareUrl": "https://file.zoom.us/juntos.mp4",
+            },
+        },
+    }
+    assert _resolver_grabacion(share, lambda url: rutas[url]) == "https://file.zoom.us/juntos.mp4"
+    assert _elegir_mp4({
+        "result": {
+            "viewMp4WithshareUrl": "http://file.zoom.us/juntos.mp4",
+            "viewMp4Url": "https://file.zoom.us/camara.mp4",
+        },
+    }, base) == "https://file.zoom.us/camara.mp4"
+    assert _elegir_mp4({"result": {"viewMp4Url": "https://127.0.0.1/a.mp4"}}, base) == ""
+    assert _elegir_mp4({"result": {"viewMp4Url": "https://10.1.2.3/a.mp4"}}, base) == ""
+    assert _elegir_mp4({"result": {"viewMp4Url": "https://user:secret@file.zoom.us/a.mp4"}}, base) == ""
+    assert _elegir_mp4({"result": {"viewMp4Url": "/archivo.mp4"}}, base) == base + "archivo.mp4"
+    assert _resolver_grabacion(play, lambda url: {
+        play: html_play,
+        base + "nws/recording/1.0/play/info/file-1": {
+            "result": {"viewMp4Url": "https://file.zoom.us/camara.mp4"},
+        },
+    }[url]) == "https://file.zoom.us/camara.mp4"
+    anidado = '<html><script>window.__data__ = {"recording":{"fileId":"file-2"}};</script></html>'
+    assert _resolver_grabacion(play, lambda url: {
+        play: anidado,
+        base + "nws/recording/1.0/play/info/file-2": {
+            "result": {"viewMp4Url": "https://ssrweb.zoom.us/v.mp4"},
+        },
+    }[url]) == "https://ssrweb.zoom.us/v.mp4"
+    comillas = "<html><script>window.__data__ = {fileId:'file-4'};</script></html>"
+    assert _resolver_grabacion(play, lambda url: {
+        play: comillas,
+        base + "nws/recording/1.0/play/info/file-4": {
+            "result": {"shareMp4Url": "https://file.zoom.us/pantalla.mp4"},
+        },
+    }[url]) == "https://file.zoom.us/pantalla.mp4"
+    parseado = (
+        '<html><script>window.__data__ = JSON.parse("'
+        + r'{\"fileId\":\"file-3\"}'
+        + '");</script></html>'
+    )
+    assert _datos_reproductor(parseado)["fileId"] == "file-3"
+    vistos = []
+
+    def pedir_clave(url):
+        vistos.append(url)
+        return '<html><form id="password_form" method="post"></form></html>'
+
+    try:
+        _resolver_grabacion(play, pedir_clave)
+    except engine.AppError as exc:
+        assert str(exc) == _MSG_CLAVE
+    else:
+        raise AssertionError("debio avisar la clave corta")
+    assert vistos == [play]
+    plantilla = (
+        '<html><script>var t = \'<form id="password_form"></form>\';</script>'
+        '<script>window.__data__ = {"fileId":"file-1"};</script></html>'
+    )
+    assert not _pide_clave_zoom(plantilla)
+    assert _resolver_grabacion(play, lambda url: {
+        play: plantilla,
+        base + "nws/recording/1.0/play/info/file-1": {
+            "result": {"viewMp4Url": "https://file.zoom.us/camara.mp4"},
+        },
+    }[url]) == "https://file.zoom.us/camara.mp4"
+    con_clave = (
+        '<html><form class="x" id="password_form"></form>'
+        '<script>window.__data__ = {"fileId":"file-1"};</script></html>'
+    )
+    assert _pide_clave_zoom(con_clave)
+    down = base + "rec/download/tokenPlay?pwd=1"
+    play_q = base + "rec/play/tokenPlay?pwd=1"
+    assert _resolver_grabacion(down, lambda url: {
+        play_q: html_play,
+        base + "nws/recording/1.0/play/info/file-1": {
+            "result": {"viewMp4Url": "https://file.zoom.us/camara.mp4"},
+        },
+    }[url]) == "https://file.zoom.us/camara.mp4"
+    assert _respuesta_pagina("text/html; charset=utf-8", b"<html></html>")
+    assert not _respuesta_pagina("video/mp4", b"\x00\x00\x00\x18ftypmp42")
+    assert _respuesta_pagina("application/octet-stream", b"<!DOCTYPE html>")
+    assert _respuesta_pagina("video/mp4", b"{")
+
+    class _Cabeceras(dict):
+        def get_content_charset(self, failobj=None):
+            return "utf-8"
+
+    class _Respuesta:
+        def __init__(self, kind: str, body: bytes):
+            self.headers = _Cabeceras({"Content-Type": kind})
+            self._body = body
+            self._pos = 0
+
+        def read(self, size: int = -1) -> bytes:
+            if self._pos >= len(self._body):
+                return b""
+            if size is None or size < 0:
+                size = len(self._body) - self._pos
+            chunk = self._body[self._pos:self._pos + size]
+            self._pos += len(chunk)
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _Router:
+        def __init__(self, mapa):
+            self.mapa = mapa
+            self.urls = []
+
+        def open(self, request, timeout=60):
+            url = request.full_url
+            self.urls.append(url)
+            if "validate" in url or "passwd" in url:
+                raise AssertionError("no hay que mandar clave")
+            if url not in self.mapa:
+                raise AssertionError(url)
+            kind, body = self.mapa[url]
+            return _Respuesta(kind, body)
+
+    import tempfile
+    video = b"\x00\x00\x00\x18ftypmp42" + (b"v" * 120_000)
+    pagina = plantilla.encode("utf-8")
+    info = json.dumps({
+        "result": {
+            "viewMp4WithshareUrl": "https://file.zoom.us/juntos.mp4",
+            "viewMp4Url": "https://file.zoom.us/camara.mp4",
+        },
+    }).encode("utf-8")
+    sample = "https://ucv-edu-pe.zoom.us/rec/play/tokenPlay"
+    target = playback_url(sample)
+    with tempfile.TemporaryDirectory() as folder:
+        dest = Path(folder) / "v.mp4"
+        directo = _Router({target: ("video/mp4", video)})
+        _bajar_zoom(sample, dest, directo)
+        assert directo.urls == [target]
+        assert dest.read_bytes() == video
+        dest.unlink()
+        router = _Router({
+            target: ("text/html; charset=utf-8", pagina),
+            sample: ("text/html", pagina),
+            base + "nws/recording/1.0/play/info/file-1": ("application/json", info),
+            "https://file.zoom.us/juntos.mp4": ("video/mp4", video),
+        })
+        _bajar_zoom(sample, dest, router)
+        assert router.urls == [
+            target,
+            sample,
+            base + "nws/recording/1.0/play/info/file-1",
+            "https://file.zoom.us/juntos.mp4",
+        ]
+        assert dest.read_bytes() == video
+        dest.unlink()
+        clave = '<html><form name="password_form"></form></html>'.encode("utf-8")
+        bloqueado = _Router({
+            target: ("text/html", clave),
+            sample: ("text/html", clave),
+        })
+        try:
+            _bajar_zoom(sample, dest, bloqueado)
+        except engine.AppError as exc:
+            assert str(exc) == _MSG_CLAVE
+        else:
+            raise AssertionError("debio avisar la clave corta")
+        assert not dest.exists()
+        assert bloqueado.urls == [target, sample]

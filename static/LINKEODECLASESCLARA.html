@@ -8,7 +8,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css?v=20261101c">
   <style>
-    .linkeo { width: min(980px, calc(100% - 32px)); margin: 28px auto 64px; }
+    .linkeo { width: min(1120px, calc(100% - 32px)); margin: 28px auto 64px; }
     .linkeo h1 { font-family: Georgia, "Palatino Linotype", serif; font-size: 34px; letter-spacing: -0.04em; margin: 0 0 8px; }
     .entrada { display: grid; gap: 12px; margin-top: 18px; }
     .entrada label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
@@ -28,17 +28,21 @@
 <body>
   <header class="top">
     <span class="brand">LINKEODECLASESCLARA</span>
-    <p class="tag">Lee tus cursos en Clementina. Esta página no aparece dentro de Clase Clara.</p>
+    <p class="tag">Programa aparte. Lee Clementina y agrega las clases a Clase Clara.</p>
   </header>
   <main class="linkeo">
     <h1>LINKEODECLASESCLARA</h1>
-    <p class="note">Entra con tu usuario de Clementina. La contraseña se usa solo para esta lectura y no se guarda.</p>
+    <p class="note">Entra con tu usuario de Clementina. La contraseña no se guarda en el sitio. Si dejas marcado el turno, queda solo en esta PC para cuando la nube lo pida. Deja abierta la ventana negra del programa.</p>
     <form class="entrada" id="forma">
       <label>Usuario o correo
         <input id="usuario" name="usuario" autocomplete="username" required maxlength="200">
       </label>
       <label>Contraseña
         <input id="clave" name="clave" type="password" autocomplete="current-password" required maxlength="200">
+      </label>
+      <label class="note">
+        <input id="turno" type="checkbox" checked>
+        A las 12:00, 18:00 y 00:00 la nube pide el escaneo. Si esta PC está encendida, lo hace aquí en segundo plano. Si no, la web deja la clase lista sola.
       </label>
       <div class="fila">
         <button class="primary" id="buscar" type="submit">Buscar clases</button>
@@ -53,11 +57,19 @@
     const clave = document.querySelector("#clave");
     const estado = document.querySelector("#estado");
     const resultado = document.querySelector("#resultado");
-    const destino = location.hostname.endsWith("netlify.app") || location.hostname === "localhost"
-      ? "/.netlify/functions/linkeo"
-      : "https://clases-universitarias.netlify.app/.netlify/functions/linkeo";
+    const enEstaPc = location.hostname === "127.0.0.1" || location.hostname === "localhost";
+    const destino = enEstaPc ? "/api/linkeo" : "/.netlify/functions/linkeo";
+    let programa = false;
+    let ultimo = null;
+    let reloj = 0;
+    const listo = fetch("/api/programa").then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      programa = response.ok && !!data.programa;
+    }).catch(() => { programa = false; });
 
+    const turno = document.querySelector("#turno");
     try { usuario.value = localStorage.getItem("linkeo-usuario") || ""; } catch (e) {}
+    try { if (localStorage.getItem("linkeo-turno") === "0") turno.checked = false; } catch (e) {}
 
     function esc(value) {
       return String(value || "").replace(/[&<>"']/g, (ch) => ({
@@ -72,25 +84,131 @@
       )).join("");
     }
 
+    function presentaciones(lista) {
+      if (!lista || !lista.length) return '<span class="vacio">Sin presentación</span>';
+      return lista.map((item) => (
+        `<div><a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.nombre || "Presentación")}</a></div>`
+      )).join("");
+    }
+
+    function esGrabacion(url) {
+      try {
+        const partes = new URL(url);
+        return partes.protocol === "https:" && /(^|\.)zoom\.us$/i.test(partes.hostname) && /\/rec\/(play|share|download)\//.test(partes.pathname);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function pintarProgreso(data) {
+      const progreso = document.querySelector("#progreso");
+      if (!progreso) return;
+      const fallos = (data.errores || []).slice(0, 6).map((item) => (
+        `${item.curso ? item.curso + ": " : ""}${item.titulo ? item.titulo + ". " : ""}${item.error || ""}`
+      )).filter(Boolean).join(" ");
+      if (data.activo) {
+        const hechas = (data.hechas || 0) + (data.ya || 0);
+        progreso.className = "note";
+        progreso.textContent = data.total
+          ? `Agregando ${hechas} de ${data.total}. Ahora: ${data.actual || "preparando el curso"}. Deja abierta la ventana negra.`
+          : "Creando los cursos. Deja abierta la ventana negra.";
+        return;
+      }
+      if (!data.terminado) return;
+      progreso.className = fallos ? "note error" : "note";
+      progreso.textContent = `Quedaron en Clase Clara: ${data.hechas || 0}. Ya estaban: ${data.ya || 0}. Cursos: ${data.cursos || 0}. A futuro: ${data.futuras || 0}. Sin grabación: ${data.sin_video || 0}.`
+        + (fallos ? " " + fallos : "");
+    }
+
+    async function agregar() {
+      const boton = document.querySelector("#agregar");
+      const progreso = document.querySelector("#progreso");
+      if (!ultimo || !boton || !progreso) return;
+      boton.disabled = true;
+      progreso.className = "note";
+      progreso.textContent = "Creando los cursos y preparando la primera grabación. Deja abierta la ventana negra.";
+      try {
+        const response = await fetch("/api/agregar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cursos: ultimo.cursos || [] }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "No pude agregar las clases.");
+        pintarProgreso(data);
+        if (reloj) clearInterval(reloj);
+        reloj = setInterval(async () => {
+          try {
+            const sigue = await fetch("/api/agregar");
+            const estadoCola = await sigue.json();
+            pintarProgreso(estadoCola);
+            if (!estadoCola.activo) {
+              clearInterval(reloj);
+              reloj = 0;
+              boton.disabled = false;
+            }
+          } catch (error) {
+            clearInterval(reloj);
+            reloj = 0;
+            progreso.className = "note error";
+            progreso.textContent = "Se cortó el programa. Vuelve a abrir LINKEODECLASESCLARA.bat y deja esa ventana abierta.";
+          }
+        }, 4000);
+      } catch (error) {
+        boton.disabled = false;
+        progreso.className = "note error";
+        progreso.textContent = error.message || "No pude agregar las clases.";
+      }
+    }
+
+    function notaFecha(sesion) {
+      if (sesion.motivo === "futura") return " · a futuro";
+      if (sesion.motivo === "sinfecha") return " · sin fecha";
+      return "";
+    }
+
     function pintar(data) {
       const cursos = Array.isArray(data.cursos) ? data.cursos : [];
       const sesiones = cursos.reduce((total, curso) => total + ((curso.sesiones && curso.sesiones.length) || 0), 0);
+      const paraAgregar = cursos.reduce((total, curso) => total + (curso.sesiones || []).reduce((suma, sesion) => (
+        suma + (sesion.agregar ? 1 : 0)
+      ), 0), 0);
+      const futuras = cursos.reduce((total, curso) => total + (curso.sesiones || []).reduce((suma, sesion) => (
+        suma + (sesion.motivo === "futura" ? 1 : 0)
+      ), 0), 0);
+      const lectura = data.zoom_lectura || {};
+      const partes = [];
+      if (lectura.recorte) {
+        partes.push(`Releí desde la penúltima clase ya encontrada. ${Number(lectura.saltadas) || 0} enlaces antiguos no se abrieron.`);
+      }
+      const quietos = Number(lectura.quietos) || 0;
+      if (quietos > 0) {
+        partes.push(quietos === 1
+          ? "1 curso sin clase en 30 días no se escaneó."
+          : `${quietos} cursos sin clase en 30 días no se escanearon.`);
+      }
+      const recorte = partes.length ? ` ${partes.join(" ")}` : "";
       const cuenta = data.cuenta ? `Entraste como ${esc(data.cuenta)}. ` : "";
       const bloques = cursos.map((curso) => {
         const filas = (curso.sesiones || []).map((sesion) => `
           <tr>
             <td>${esc(sesion.numero ? "Sesión " + sesion.numero : "—")}</td>
             <td>${esc(sesion.titulo)}</td>
-            <td>${esc(sesion.fecha || "—")}</td>
+            <td>${esc((sesion.fecha || "—") + notaFecha(sesion))}</td>
             <td>${esc(sesion.hora || "—")}</td>
             <td>${enlaces(sesion.enlaces)}</td>
+            <td>${presentaciones(sesion.presentaciones)}</td>
           </tr>`).join("");
         const cuerpo = filas
-          ? `<table><thead><tr><th>Sesión</th><th>Título</th><th>Fecha</th><th>Hora</th><th>Enlace</th></tr></thead><tbody>${filas}</tbody></table>`
+          ? `<table><thead><tr><th>Sesión</th><th>Título</th><th>Fecha</th><th>Hora</th><th>Enlace</th><th>Presentación</th></tr></thead><tbody>${filas}</tbody></table>`
           : `<p class="vacio">${esc(curso.aviso || "Este curso no tiene sesiones para mostrar.")}</p>`;
         return `<article class="card curso"><h2>${esc(curso.nombre)}</h2><p class="prof">${esc(curso.profesor || "Sin profesor visible")}</p>${cuerpo}</article>`;
       }).join("");
-      resultado.innerHTML = `<p class="note">${cuenta}${cursos.length} cursos, ${sesiones} sesiones.</p>${bloques}`;
+      const accion = programa
+        ? `<div class="fila"><button class="primary" id="agregar" type="button">Agregar a ClaseClara</button><p class="note" id="progreso">${paraAgregar} grabaciones entran a su curso. La lista muestra todas las sesiones y enlaces que encuentra. ${futuras} sesiones a futuro no se cargan hasta que la grabación esté disponible. Si ya está, se agregan. La presentación queda en Presentación y las lecturas en Lecturas, también si la clase ya estaba. El profesor, la fecha y la hora de empezar quedan en la clase. Si Clementina no trae profesor, ahí se lee Sin profesor visible.</p></div>`
+        : `<p class="note">Para agregarlas a Clase Clara, abre LINKEODECLASESCLARA.bat y deja esa ventana abierta.</p>`;
+      resultado.innerHTML = `<p class="note">${cuenta}${cursos.length} cursos, ${sesiones} sesiones, ${paraAgregar} para agregar, ${futuras} a futuro.${esc(recorte)}</p>${accion}${bloques}`;
+      document.querySelector("#agregar")?.addEventListener("click", agregar);
     }
 
     forma.addEventListener("submit", async (event) => {
@@ -98,19 +216,37 @@
       const boton = document.querySelector("#buscar");
       boton.disabled = true;
       estado.className = "note";
-      estado.textContent = "Leyendo Clementina…";
-      resultado.innerHTML = "";
+      estado.textContent = "Buscando en Clementina. Puede tardar un par de minutos. Deja esta página abierta.";
+      ultimo = null;
       try { localStorage.setItem("linkeo-usuario", usuario.value.trim()); } catch (e) {}
+      try { localStorage.setItem("linkeo-turno", turno.checked ? "1" : "0"); } catch (e) {}
+      if (enEstaPc) {
+        fetch("http://127.0.0.1:8781/api/acceso", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            usuario: usuario.value.trim(),
+            clave: clave.value,
+            recordar: turno.checked,
+          }),
+        }).catch(() => {});
+      }
       try {
+        await listo;
         const response = await fetch(destino, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ usuario: usuario.value.trim(), clave: clave.value }),
         });
         const data = await response.json().catch(() => ({}));
-        if (response.status === 404) throw new Error("La lectura todavía no está publicada en el sitio.");
+        if (response.status === 404) {
+          throw new Error(enEstaPc
+            ? "Abre LINKEODECLASESCLARA.bat y deja esa ventana abierta."
+            : "La lectura todavía no está en este sitio. Ábrelo en esta computadora con LINKEODECLASESCLARA.bat.");
+        }
         if (!response.ok) throw new Error(data.error || "No pude leer Clementina.");
         estado.textContent = "";
+        ultimo = data;
         pintar(data);
       } catch (error) {
         estado.className = "note error";

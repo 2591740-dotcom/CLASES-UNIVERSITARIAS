@@ -843,6 +843,10 @@ function cabezaLista(titulo, hay) {
   return `<div class="list-head"><h2>${esc(titulo)}</h2>${boton}</div>`;
 }
 
+function cursoCapsula(nombre) {
+  return `<div class="curso-linea"><button class="capsule" id="curso-capsula" type="button">${esc(nombre || "Curso")}</button><p class="curso-aviso">Selecciona el curso</p></div>`;
+}
+
 function phoneHome(classes, cursos) {
   const list = Array.isArray(classes) ? classes : [];
   const pack = cursos || { items: [], activo: "", nombre: "" };
@@ -851,20 +855,20 @@ function phoneHome(classes, cursos) {
   const mine = list.length
     ? list.map(cardHtml).join("")
     : pack.nombre
-      ? `<p class="empty">Todavía no hay clases en ${esc(pack.nombre)}. Carga un video o pega el enlace de Zoom.</p>`
+      ? `<p class="empty">Todavía no hay clases en ${esc(pack.nombre)}.</p>`
       : `<p class="empty">Crea un curso para guardar aquí las clases${ambito ? ` de ${esc(estudio.carrera)}` : ""}.</p>`;
   return `
     <section class="hero">
       <p class="kicker">${esc(ambito || "Tu clase, en claro")}</p>
-      <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
+      ${cursoCapsula(pack.nombre)}
+      <p class="note curso-profesor">${esc(profesorDelCurso(pack.activo, list))}</p>
       <h1>La mejor forma de Aprender.</h1>
-      <button class="primary prepare-open" id="open-prepare" type="button">Preparar clase</button>
     </section>
     ${cabezaLista(pack.nombre || "Clases", list.length > 0)}
     <div class="grid">${mine}</div>`;
 }
 
-function homeHtml(classes, status, cursos) {
+function homeHtml(classes, status, cursos, orden) {
   const list = Array.isArray(classes) ? classes : [];
   const state = status || {};
   if (window.claseClaraCloud) return phoneHome(list, cursos);
@@ -877,7 +881,10 @@ function homeHtml(classes, status, cursos) {
       return (item.curso_id || primero) === pack.activo;
     })
     : list;
-  const ordenadas = ordenarClases(visibles, leerOrdenLocal(pack.activo || "pc"));
+  const cursoId = pack.activo || "pc";
+  const remoto = orden && typeof orden === "object" && Array.isArray(orden[cursoId]) ? orden[cursoId] : [];
+  const guardado = remoto.length ? remoto : leerOrdenLocal(cursoId);
+  const ordenadas = ordenarClases(visibles, guardado);
   const mine = ordenadas.length
     ? ordenadas.map(cardHtml).join("")
     : pack.nombre
@@ -887,7 +894,8 @@ function homeHtml(classes, status, cursos) {
   return `
     <section class="hero">
       <p class="kicker">Tu clase, en claro</p>
-      <button class="capsule" id="curso-capsula" type="button">${esc(pack.nombre || "Curso")}</button>
+      ${cursoCapsula(pack.nombre)}
+      <p class="note curso-profesor">${esc(profesorDelCurso(pack.activo, list))}</p>
       <h1>Entiende la clase sin volver a verla entera.</h1>
       ${ffmpeg}
     </section>
@@ -905,7 +913,7 @@ function homeHtml(classes, status, cursos) {
         <div class="row">
           <button class="primary" id="go" type="button">Procesar</button>
         </div>
-        <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. El nombre de la clase sale de lo que se dijo; si queda mal, se corrige al abrirla.</p>
+        <p class="note">Elegir video abre el explorador en Documentos\Zoom. Si pegas un enlace, la PC lo baja. El nombre de la clase queda fijo, como lo toma el programa al prepararla.</p>
       </div>
     </section>
     ${cabezaLista(pack.nombre || "Clases ya hechas", ordenadas.length > 0)}
@@ -946,9 +954,88 @@ function guardarOrdenLocal(cursoId, ids) {
   localStorage.setItem("cc-orden", JSON.stringify(all));
 }
 
+const PORTADA_STOP = new Set("para como esta este esto estas estos desde entre sobre tambien tiene tienen puede pueden clase tema parte ejemplo cuando donde porque pero cada todo toda todos todas hacia durante mediante segun cual cuales estan sido video minuto explicacion explica explicar aquella aquellos aquella bajo tras contra hasta sesion asincronica sincronica primer nombre plano".split(" "));
+const PORTADA_GENERICA = /profesor|presentador|docente|bienvenida|participante|videollamada|\bzoom\b|camara|video apagado|video prendido|video activado|pantalla de inicio|pantalla inicial|pantalla negra|pantalla en blanco|pantalla sin |nombre del |nombre en pantalla|lista de asistencia|lista de grupos|inicio de la|fondo azul|logo |avatar/;
+
+function palabrasPortada(text) {
+  const folded = String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return new Set((folded.match(/[a-z0-9]{4,}/g) || []).filter((word) => !PORTADA_STOP.has(word)));
+}
+
+function tituloPortada(text) {
+  const folded = String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return folded.replace(/^sesion\s+\d+\s*/, "").replace(/asincronica/g, " ").replace(/sincronica/g, " ");
+}
+
+function indicePortada(titulo, capturas) {
+  const buscadas = palabrasPortada(tituloPortada(titulo));
+  if (!buscadas.size || !Array.isArray(capturas)) return 0;
+  let mejor = 0;
+  let puntos = 0;
+  for (const shot of capturas) {
+    const indice = Number(shot && shot.indice);
+    if (!Number.isInteger(indice) || indice < 1 || indice > 24) continue;
+    const muestra = String((shot && shot.que_muestra) || "");
+    const score = overlapCount(buscadas, palabrasPortada(muestra));
+    if (score < 1) continue;
+    const folded = muestra.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (score < 2 && PORTADA_GENERICA.test(folded)) continue;
+    if (score > puntos || (score === puntos && indice < mejor)) {
+      puntos = score;
+      mejor = indice;
+    }
+  }
+  return mejor;
+}
+
+function portadaDeClase(item) {
+  if (!item) return "";
+  const directa = String(item.portada || "");
+  if (/^https:\/\/\S+$/i.test(directa)) return directa;
+  if (/^\/media\/[0-9]{8}-[0-9]{6}-[0-9a-f]{6}\/frames\/\d\d\.jpg$/i.test(directa)) return directa;
+  return "";
+}
+
+function tonoPortada(text) {
+  let n = 0;
+  const source = String(text || "");
+  for (let i = 0; i < source.length; i += 1) n = (n + source.charCodeAt(i) * (i + 1)) % 4;
+  return n;
+}
+
+function partesPortada(titulo) {
+  const text = String(titulo || "").replace(/\s+/g, " ").trim() || "Clase";
+  const sesion = text.match(/^sesi[oó]n\s+(\d+)/i);
+  const asinc = /asincr[oó]nica/i.test(text);
+  let tema = text.replace(/^sesi[oó]n\s+\d+\s*/i, "").replace(/^[·•.\-:\s]+/, "");
+  tema = tema.replace(/^asincr[oó]nica\s*/i, "").replace(/^[·•.\-:\s]+/, "").replace(/\s+/g, " ").trim() || text;
+  let kicker = "";
+  let marca = "";
+  if (sesion) {
+    kicker = `Sesión ${sesion[1]}`;
+    marca = String(sesion[1]).padStart(2, "0");
+  } else if (/asesor/i.test(text)) {
+    kicker = "Asesoría";
+    marca = "A";
+  } else if (/examen/i.test(text)) {
+    kicker = "Examen";
+    marca = "E";
+  } else {
+    const letra = tema.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/);
+    marca = letra ? letra[0].toLocaleUpperCase("es") : "C";
+  }
+  if (asinc) kicker = kicker ? `${kicker} · Asincrónica` : "Asincrónica";
+  return { kicker, tema, marca, tono: tonoPortada(text) };
+}
+
+function posterHtml(titulo) {
+  const partes = partesPortada(titulo);
+  const kicker = partes.kicker ? `<p class="poster-kicker">${esc(partes.kicker)}</p>` : "";
+  return `<div class="card-poster" data-tono="${partes.tono}" aria-hidden="true"><span class="poster-mark">${esc(partes.marca)}</span>${kicker}<p class="poster-title">${esc(partes.tema)}</p></div>`;
+}
+
 function cardHtml(item) {
   const state = item.status === "ready" ? "Lista" : item.status === "error" ? "Se detuvo" : "Preparando";
-  const extra = item.status === "error" ? item.error : item.status === "ready" ? durationLabel(item.duration) : item.detail;
   const avisos = Number(item.avisos) || 0;
   const flag = avisos ? `<span class="status alert">${avisos} aviso${avisos === 1 ? "" : "s"}</span>` : "";
   const fecha = fechaIso(item.fecha);
@@ -961,8 +1048,14 @@ function cardHtml(item) {
     : item.status === "ready"
       ? [durationLabel(item.duration), aviso].filter(Boolean).join(" · ")
       : item.detail;
+  const foto = portadaDeClase(item);
+  const img = foto
+    ? `<img class="card-thumb" src="${esc(foto)}" alt="" draggable="false" decoding="async" loading="lazy" onerror="this.remove()">`
+    : "";
+  const mini = `<div class="card-cover">${posterHtml(item.title)}${img}</div>`;
   return `
     <article class="card" data-id="${esc(item.id)}" data-fecha="${esc(fecha)}" data-hora="${esc(hora)}">
+      ${mini}
       <div class="card-top">
         <div class="card-marks">
           <span class="status ${esc(item.status)}">${esc(state)}</span>
@@ -1162,9 +1255,10 @@ function abrirCursoModal(destino) {
   const pack = window.CLASECLARA_CURSOS || { items: [], activo: "", nombre: "" };
   const deClase = destino === "clase";
   const actualId = deClase ? (clase && clase.curso_id) || "" : pack.activo;
+  const clases = (homeCache && homeCache.list && homeCache.list.classes) || [];
   const lista = pack.items.map((item) => {
     const on = item.id === actualId ? " on" : "";
-    return `<button class="course-pick${on}" type="button" data-id="${esc(item.id)}">${esc(item.nombre)}</button>`;
+    return `<div class="course-row"><button class="course-pick${on}" type="button" data-id="${esc(item.id)}">${esc(item.nombre)}</button><p class="note">${esc(profesorDelCurso(item.id, clases))}</p></div>`;
   }).join("");
   const modal = document.createElement("div");
   modal.id = "course-modal";
@@ -1180,23 +1274,30 @@ function abrirCursoModal(destino) {
   document.addEventListener("keydown", onCursoEscape);
   const fallo = (error) => {
     const note = modal.querySelector("#curso-error");
+    if (!note) {
+      alert(error.message || "No pude guardar el curso.");
+      return;
+    }
     note.hidden = false;
     note.textContent = error.message || "No pude guardar el curso.";
   };
   modal.addEventListener("click", (event) => {
     if (event.target === modal) cerrarCursoModal();
   });
-  const usarCurso = async (id, nombre) => {
-    if (deClase) {
+  const usarCurso = async (id) => {
+    if (deClase && (!clase || clase.curso_id !== id)) {
       await cursoAccion().asignarCurso(clase.id, id);
-      clase.curso_id = id;
-      clase.curso = nombre;
-      const capsula = document.querySelector("#clase-curso");
-      if (capsula) capsula.textContent = nombre || "Curso";
-      cerrarCursoModal();
-      return;
+      if (clase) {
+        clase.curso_id = id;
+        const elegido = (window.CLASECLARA_CURSOS && window.CLASECLARA_CURSOS.items || []).find((item) => item.id === id);
+        if (elegido) clase.curso = elegido.nombre || "";
+      }
     }
     cursoAccion().elegirCurso(id);
+    if (deClase) {
+      await salirAInicio();
+      return;
+    }
     cerrarCursoModal();
     await showHome();
   };
@@ -1237,20 +1338,21 @@ function abrirCursoModal(destino) {
     button.disabled = true;
     try {
       const creado = await cursoAccion().crearCurso(nombreCursoNuevo());
-      if (deClase) {
+      if (deClase && clase) {
         await cursoAccion().asignarCurso(clase.id, creado.activo);
         clase.curso_id = creado.activo;
         clase.curso = creado.nombre;
       }
-      cerrarCursoModal();
-      if (!deClase) await showHome();
-      const capsula = document.querySelector(deClase ? "#clase-curso" : "#curso-capsula");
+      if (deClase) await salirAInicio();
+      else {
+        cerrarCursoModal();
+        await showHome();
+      }
+      const capsula = document.querySelector("#curso-capsula");
       if (capsula) {
         capsula.textContent = creado.nombre || "Curso";
         editarNombreCurso(capsula, creado.activo, (nombre, cambio) => {
-          if (!cambio) return;
-          if (deClase && clase) clase.curso = nombre;
-          if (!deClase) showHome();
+          if (cambio) showHome();
         });
       }
     } catch (error) {
@@ -1258,6 +1360,28 @@ function abrirCursoModal(destino) {
       button.disabled = false;
     }
   };
+}
+
+async function salirAInicio() {
+  if (homeCache && window.CLASECLARA_CURSOS) {
+    homeCache.curso = window.CLASECLARA_CURSOS.activo || homeCache.curso;
+    const movida = clase && clase.id;
+    const clases = homeCache.list && homeCache.list.classes;
+    if (movida && Array.isArray(clases)) {
+      clases.forEach((item) => {
+        if (item.id === movida) item.curso_id = window.CLASECLARA_CURSOS.activo;
+      });
+    }
+  }
+  if (history.state && history.state.cc === "class") {
+    ignorePop = true;
+    history.back();
+  }
+  try {
+    await showHome();
+  } finally {
+    ignorePop = false;
+  }
 }
 
 function cerrarPreparar(desdeAtras) {
@@ -1330,7 +1454,7 @@ function pintarInicio(status, list) {
   clearYouTube();
   unbindMiniPlayer();
   const cursos = window.claseClaraCloud ? list.cursos : resolverCursoPc(list.cursos);
-  app.innerHTML = homeHtml(list.classes, status, cursos);
+  app.innerHTML = homeHtml(list.classes, status, cursos, list && list.orden);
   const capsula = document.querySelector("#curso-capsula");
   if (capsula) {
     alTocarCurso(
@@ -1350,8 +1474,6 @@ function pintarInicio(status, list) {
   }
   const pick = document.querySelector("#pick");
   if (pick) pick.onclick = chooseFile;
-  const openPrepare = document.querySelector("#open-prepare");
-  if (openPrepare) openPrepare.onclick = abrirPreparar;
   const go = document.querySelector("#go");
   if (go) go.onclick = () => {
     const link = document.querySelector("#path")?.value.trim() || "";
@@ -1481,23 +1603,36 @@ async function ordenarPorFecha() {
   }
 }
 
+function esCursoId(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ""));
+}
+
 async function guardarOrdenVisible(grid) {
   const ids = idsDelGrid(grid);
-  try {
-    if (window.claseClaraCloud) {
+  const pack = window.CLASECLARA_CURSOS;
+  const cursoId = pack && pack.activo ? pack.activo : "pc";
+  if (window.claseClaraCloud) {
+    try {
       await api("/api/classes/order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids }),
       });
-      return;
+    } catch (error) {
+      alert(error.message);
+      showHome();
     }
-    const pack = window.CLASECLARA_CURSOS;
-    guardarOrdenLocal(pack && pack.activo ? pack.activo : "pc", ids);
-  } catch (error) {
-    alert(error.message);
-    showHome();
+    return;
   }
+  guardarOrdenLocal(cursoId, ids);
+  if (!esCursoId(cursoId)) return;
+  try {
+    await api("/api/classes/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, curso_id: cursoId }),
+    });
+  } catch { /* el orden queda en esta PC si no hay red */ }
 }
 
 function prepararMover(event, card, grid) {
@@ -2010,40 +2145,6 @@ async function guardarFecha(input) {
   }
 }
 
-async function saveTitle() {
-  const input = document.querySelector("#class-title");
-  const title = input.value.trim();
-  if (!title) {
-    alert("Escribe un nombre.");
-    return;
-  }
-  const button = document.querySelector("#rename button");
-  button.disabled = true;
-  try {
-    const saved = await api(`/api/classes/${clase.id}/title`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, materia: clase.materia || "" }),
-    });
-    clase.title = saved.title;
-    clase.materia = saved.materia;
-    clase.title_custom = saved.title_custom;
-    if (clase.study) clase.study.titulo = saved.title;
-    document.querySelector("#class-heading").textContent = saved.title;
-    document.title = saved.title;
-    const form = document.querySelector("#rename");
-    const opener = document.querySelector("#rename-open");
-    if (form && form.classList.contains("open")) {
-      form.classList.remove("open");
-      if (opener) opener.hidden = false;
-    }
-  } catch (error) {
-    alert(error.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function retryJob(id, retranscribe) {
   shown = "";
   renderProcess({ id, status: "processing", stage: "audio", detail: "Retomando la clase", started: Math.floor(Date.now() / 1000) });
@@ -2258,6 +2359,8 @@ function htmlDelPanel(data, id) {
   if (id === "casos") return casesHtml(study);
   if (id === "capturas") return shotsHtml(data);
   if (id === "links") return linksHtml(study);
+  if (id === "presentacion") return presentacionesHtml(data);
+  if (id === "lecturas") return lecturasHtml(data);
   if (id === "texto") return transcriptHtml(data.lines || []);
   return "";
 }
@@ -2267,9 +2370,101 @@ function panelDeEstudio(data, id, oculto, activo) {
   return `<div data-panel="${id}"${oculto ? " hidden" : ""}${listo ? ' data-listo="1"' : ""}>${listo ? htmlDelPanel(data, id) : ""}</div>`;
 }
 
+function listaPresentaciones(data) {
+  const directas = Array.isArray(data.presentaciones) ? data.presentaciones : [];
+  const enEstudio = data.study && Array.isArray(data.study.presentaciones) ? data.study.presentaciones : [];
+  const fuente = directas.length ? directas : enEstudio;
+  const vistos = new Set();
+  const salida = [];
+  for (const item of fuente) {
+    const url = String((item && item.url) || "");
+    if (!/^https:\/\//i.test(url) || vistos.has(url)) continue;
+    vistos.add(url);
+    const nombre = String((item && item.nombre) || "").replace(/\s+/g, " ").trim();
+    salida.push({ nombre: nombre || "Presentación", url });
+  }
+  return salida;
+}
+
+function presentacionesHtml(data) {
+  const items = listaPresentaciones(data);
+  if (!items.length) {
+    return '<p class="empty">Esta clase no tiene una presentación de Clementina.</p>';
+  }
+  const filas = items.map((item) => `
+    <article class="block link-item">
+      <a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.nombre)}</a>
+    </article>`).join("");
+  return `<p class="note">Archivo de la sesión en Clementina. Si pide entrar, usa tu usuario de la universidad.</p>${filas}`;
+}
+
+function listaLecturas(data) {
+  const directas = Array.isArray(data.lecturas) ? data.lecturas : [];
+  const enEstudio = data.study && Array.isArray(data.study.lecturas) ? data.study.lecturas : [];
+  const fuente = directas.length ? directas : enEstudio;
+  const vistos = new Set();
+  const salida = [];
+  for (const item of fuente) {
+    const url = String((item && item.url) || "");
+    if (!/^https:\/\//i.test(url) || vistos.has(url)) continue;
+    let host = "";
+    try { host = new URL(url).hostname; } catch { host = ""; }
+    if (/(^|\.)zoom\.us$/i.test(host)) continue;
+    vistos.add(url);
+    const nombre = String((item && item.nombre) || "").replace(/\s+/g, " ").trim();
+    salida.push({ nombre: nombre || "Lectura", url });
+  }
+  return salida;
+}
+
+function lecturasHtml(data) {
+  const items = listaLecturas(data);
+  if (!items.length) {
+    return '<p class="empty">Esta clase no tiene lecturas de Clementina.</p>';
+  }
+  const filas = items.map((item) => `
+    <article class="block link-item">
+      <a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.nombre)}</a>
+    </article>`).join("");
+  return `<p class="note">Lectura u otro documento de la sesión. Si Clementina pide entrar, usa tu usuario de la universidad.</p>${filas}`;
+}
+
+function profesorLimpio(value) {
+  const texto = String(value || "").replace(/\s+/g, " ").trim();
+  if (!texto || texto.toLowerCase() === "sin profesor visible") return "";
+  return texto.slice(0, 160);
+}
+
+function profesorVisible(value) {
+  return profesorLimpio(value) || "Sin profesor visible";
+}
+
+function profesorDeClase(item) {
+  if (!item) return "";
+  return profesorLimpio(item.profesor || (item.study && item.study.profesor));
+}
+
+function profesorDelCurso(cursoId, classes) {
+  for (const item of classes || []) {
+    if (cursoId && item.curso_id !== cursoId) continue;
+    const nombre = profesorDeClase(item);
+    if (nombre) return nombre;
+  }
+  if (cursoId) {
+    const pack = window.CLASECLARA_CURSOS || {};
+    const curso = (pack.items || []).find((item) => item.id === cursoId);
+    const guardado = profesorLimpio(curso && curso.profesor);
+    if (guardado) return guardado;
+  }
+  return "Sin profesor visible";
+}
+
 function studyHtml(data) {
   const study = data.study || {};
   const hasNotices = (study.avisos || []).length > 0;
+  const ppts = listaPresentaciones(data);
+  const lecturas = listaLecturas(data);
+  const docente = profesorVisible(data.profesor || study.profesor);
   const shownTitle = data.title_custom ? (data.title || study.titulo || "Clase") : (study.titulo || data.title || "Clase");
   const frames = data.frames || [];
   const film = frames.map((frame, index) => {
@@ -2292,17 +2487,9 @@ function studyHtml(data) {
           <div>
             ${when ? `<p class="kicker">${esc(when)}</p>` : ""}
             <button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>
+            <p class="note" id="clase-profesor">${esc(docente)}</p>
             <h1 id="class-heading">${esc(shownTitle)}</h1>
             <p class="idea">${esc(study.idea || "")}</p>
-            <button class="texty" id="rename-open" type="button">Cambiar nombre</button>
-            <form id="rename" class="rename">
-              <div class="grow">
-                <label for="class-title">Nombre de la clase</label>
-                <input id="class-title" type="text" maxlength="140" value="${esc(shownTitle)}">
-              </div>
-              <button class="ghost" type="submit">Guardar</button>
-              <p class="note rename-note">Sale de lo que se dijo en la clase. Cámbialo si el tema no coincide.</p>
-            </form>
           </div>
         </div>
         ${player}
@@ -2324,6 +2511,8 @@ function studyHtml(data) {
           ${(study.casos || []).length ? tab("casos", "Casos", false) : ""}
           ${tab("capturas", "Capturas", false)}
           ${tab("links", "Links", false)}
+          ${ppts.length ? tab("presentacion", "Presentación", false) : ""}
+          ${lecturas.length ? tab("lecturas", "Lecturas", false) : ""}
           ${tab("texto", "Transcripción", false)}
         </div>
         <div id="panels">
@@ -2336,6 +2525,8 @@ function studyHtml(data) {
           ${(study.casos || []).length ? panelDeEstudio(data, "casos", true, hasNotices ? "avisos" : "explicacion") : ""}
           ${panelDeEstudio(data, "capturas", true, hasNotices ? "avisos" : "explicacion")}
           ${panelDeEstudio(data, "links", true, hasNotices ? "avisos" : "explicacion")}
+          ${ppts.length ? panelDeEstudio(data, "presentacion", true, hasNotices ? "avisos" : "explicacion") : ""}
+          ${lecturas.length ? panelDeEstudio(data, "lecturas", true, hasNotices ? "avisos" : "explicacion") : ""}
           ${panelDeEstudio(data, "texto", true, hasNotices ? "avisos" : "explicacion")}
         </div>
       </section>
@@ -3956,9 +4147,24 @@ function programarPaneles() {
   else setTimeout(paso, 40);
 }
 
+function sostenerAbajo(y) {
+  const panels = document.querySelector("#panels");
+  if (!panels || y <= 0) return;
+  const maximo = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  panels.style.minHeight = "";
+  let falta = y - maximo();
+  if (falta > 1) {
+    panels.style.minHeight = `${Math.ceil(panels.getBoundingClientRect().height + falta)}px`;
+    falta = y - maximo();
+    if (falta > 1) panels.style.minHeight = `${Math.ceil(parseFloat(panels.style.minHeight) + falta)}px`;
+  }
+  if (window.scrollY + 1 < y) window.scrollTo(0, y);
+}
+
 function elegirPestana(id) {
   stopSpeech();
   closeWikiPeek();
+  const y = window.scrollY;
   llenarPanel(id);
   document.querySelectorAll("[data-tab]").forEach((tabButton) => {
     tabButton.setAttribute("aria-selected", tabButton.dataset.tab === id ? "true" : "false");
@@ -3966,6 +4172,7 @@ function elegirPestana(id) {
   document.querySelectorAll("[data-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.panel !== id;
   });
+  sostenerAbajo(y);
 }
 
 function abrirAvisos() {
@@ -3992,19 +4199,6 @@ function bindStudy() {
     );
   }
   bindMiniPlayer();
-  const rename = document.querySelector("#rename");
-  const renameOpen = document.querySelector("#rename-open");
-  if (renameOpen && rename) {
-    renameOpen.onclick = () => {
-      rename.classList.add("open");
-      renameOpen.hidden = true;
-      document.querySelector("#class-title")?.focus();
-    };
-  }
-  if (rename) rename.onsubmit = (event) => {
-    event.preventDefault();
-    saveTitle();
-  };
   const findAvisos = document.querySelector("#find-avisos");
   if (findAvisos) findAvisos.onclick = () => retryJob(clase.id, false);
   document.querySelectorAll(".ver-respuesta").forEach((button) => {

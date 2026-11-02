@@ -16,7 +16,7 @@ export default async (req) => {
     return Response.json({ error: "Escribe tu usuario y tu contraseña de Clementina." }, { status: 400 });
   }
   try {
-    return Response.json(await entrarYLeer(usuario, clave));
+    return Response.json(await entrarYLeer(usuario, clave, fetch, { cortar: true }));
   } catch (error) {
     const publico = error && error.publico;
     return Response.json(

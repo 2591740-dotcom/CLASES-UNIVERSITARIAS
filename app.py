@@ -368,6 +368,8 @@ def public_meta(meta: dict) -> dict:
         "hora": engine.hora_valida(str(meta.get("hora") or "")),
         "duration": meta.get("duration") or 0,
         "title_custom": bool(meta.get("title_custom")),
+        "materia_custom": bool(meta.get("materia_custom")),
+        "profesor": cloud.profesor_limpio(meta.get("profesor")),
         "frames": meta.get("frames") or [],
         "started": meta.get("started") or 0,
         "media_kind": "youtube" if watched else "",
@@ -377,24 +379,322 @@ def public_meta(meta: dict) -> dict:
     }
 
 
+def _filas_por_id() -> dict[str, dict]:
+    try:
+        rows = cloud.filas_vista()
+    except engine.AppError:
+        return {}
+    index: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        class_id = str(row.get("id") or "")
+        if cloud._valid_id(class_id):
+            index[class_id] = row
+    return index
+
+
+def _estudio_de(row: dict | None) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    estudio = row.get("estudio")
+    return dict(estudio) if isinstance(estudio, dict) else {}
+
+
+def _avisos_de(estudio: dict) -> list:
+    avisos = estudio.get("avisos") if isinstance(estudio, dict) else None
+    return avisos if isinstance(avisos, list) else []
+
+
+def _estado_visible(estado: str) -> str:
+    text = str(estado or "").strip().lower()
+    if text == "error":
+        return "error"
+    if text in {"pendiente", "procesando"}:
+        return "processing"
+    return "ready"
+
+
+def _titulo_visible(row: dict) -> tuple[str, bool]:
+    estudio = _estudio_de(row)
+    remote_title, remote_custom, _stamp = cloud._titulo_remoto(row)
+    if remote_custom and remote_title:
+        return remote_title, True
+    columna = " ".join(str(row.get("titulo") or "").split())
+    guardado = " ".join(str(estudio.get("titulo") or "").split())
+    return (columna or guardado or "Clase")[:140], False
+
+
+def _marca_creado(creado: str) -> int:
+    text = str(creado or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+
+def absorber_meta(class_id: str, meta: dict, remote: dict | None, study_title: str = "") -> dict:
+    if not isinstance(remote, dict):
+        return meta
+    cambios = cloud.cambios_de_remoto(meta, remote, study_title)
+    if not cambios:
+        return meta
+    nulos = [key for key, value in cambios.items() if value is None]
+    limpios = {key: value for key, value in cambios.items() if value is not None}
+    updated = update_meta(class_id, **limpios) if limpios else dict(meta)
+    if nulos:
+        with META_LOCK:
+            current = read_meta(class_id)
+            for key in nulos:
+                current.pop(key, None)
+            write_meta(class_id, current)
+            updated = dict(current)
+    return updated
+
+
+def _guardar_estudio(class_id: str, study: dict) -> None:
+    path = class_dir(class_id) / "study.json"
+    path.write_text(json.dumps(study, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _estudio_util(study) -> bool:
+    if not isinstance(study, dict):
+        return False
+    explica = study.get("explicacion")
+    resumen = str(study.get("resumen") or "").strip()
+    return bool((isinstance(explica, list) and explica) or resumen or _avisos_de(study))
+
+
+def _mezclar_estudio_local(class_id: str, meta: dict, study, remote: dict | None):
+    """Trae huecos de la web o la APK. No toca una clase que esta PC todavía prepara."""
+    status = str(meta.get("status") or "")
+    if status == "processing" or not isinstance(remote, dict):
+        return study
+    estudio = _estudio_de(remote)
+    ppt = cloud.presentaciones_limpias(meta.get("presentaciones"))
+    if not isinstance(study, dict):
+        if status != "ready" or (not _estudio_util(estudio) and not ppt):
+            return study
+        nuevo = dict(estudio)
+        if ppt:
+            nuevo["presentaciones"] = ppt
+        lecturas = cloud.lecturas_limpias(meta.get("lecturas"))
+        if lecturas:
+            nuevo["lecturas"] = lecturas
+        profesor = cloud.profesor_limpio(meta.get("profesor"))
+        if profesor:
+            nuevo["profesor"] = profesor
+        reloj = engine.hora_valida(str(meta.get("hora") or ""))
+        if reloj:
+            nuevo["hora_clase"] = reloj
+        if meta.get("title_custom") and meta.get("title"):
+            nuevo["titulo"] = meta.get("title")
+        _guardar_estudio(class_id, nuevo)
+        return nuevo
+    changed = False
+    if ppt and ppt != cloud.presentaciones_limpias(study.get("presentaciones")):
+        study["presentaciones"] = ppt
+        changed = True
+    lecturas = cloud.lecturas_limpias(meta.get("lecturas"))
+    if lecturas and lecturas != cloud.lecturas_limpias(study.get("lecturas")):
+        study["lecturas"] = lecturas
+        changed = True
+    profesor = cloud.profesor_limpio(meta.get("profesor"))
+    if profesor and study.get("profesor") != profesor:
+        study["profesor"] = profesor
+        changed = True
+    reloj = engine.hora_valida(str(meta.get("hora") or ""))
+    if reloj and study.get("hora_clase") != reloj:
+        study["hora_clase"] = reloj
+        changed = True
+    remotos = _avisos_de(estudio)
+    locales = study.get("avisos")
+    if remotos and not (isinstance(locales, list) and locales):
+        study["avisos"] = remotos
+        changed = True
+    locales_links = study.get("links") if isinstance(study.get("links"), list) else []
+    limpios = [
+        item for item in locales_links
+        if isinstance(item, dict) and str(item.get("url") or "").strip()
+    ]
+    vistos = {str(item.get("url") or "").strip() for item in limpios}
+    extra = []
+    remotos_links = estudio.get("links") if isinstance(estudio.get("links"), list) else []
+    for item in remotos_links:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url or url in vistos:
+            continue
+        extra.append(item)
+        vistos.add(url)
+    if extra:
+        study["links"] = limpios + extra
+        changed = True
+    explica = study.get("explicacion")
+    resumen = str(study.get("resumen") or "").strip()
+    tiene_texto = (isinstance(explica, list) and explica) or bool(resumen)
+    remoto_explica = estudio.get("explicacion")
+    remoto_resumen = str(estudio.get("resumen") or "").strip()
+    tiene_remoto = (isinstance(remoto_explica, list) and remoto_explica) or bool(remoto_resumen)
+    if not tiene_texto and tiene_remoto:
+        for key in (
+            "titulo", "materia", "sesion", "idea", "dificil", "resumen",
+            "explicacion", "esquema", "puntos", "terminos", "repaso", "casos",
+            "links", "wiki", "avisos",
+        ):
+            if key in estudio and not study.get(key):
+                study[key] = estudio[key]
+                changed = True
+    if meta.get("title_custom") and meta.get("title") and study.get("titulo") != meta.get("title"):
+        study["titulo"] = meta.get("title")
+        changed = True
+    if changed:
+        _guardar_estudio(class_id, study)
+    return study
+
+
+def _traer_chat(class_id: str, chat, remote: dict | None, status: str):
+    local = chat if isinstance(chat, list) else []
+    if status == "processing" or not isinstance(remote, dict):
+        return local
+    remoto = remote.get("chat")
+    if not isinstance(remoto, list) or not remoto or len(remoto) <= len(local):
+        return local
+    path = class_dir(class_id) / "chat.json"
+    path.write_text(json.dumps(remoto, ensure_ascii=False, indent=2), encoding="utf-8")
+    return remoto
+
+
+def tarjeta_nube(row: dict | None) -> dict | None:
+    if not isinstance(row, dict) or not cloud.es_de_esta_pc(row):
+        return None
+    class_id = str(row.get("id") or "")
+    if not cloud._valid_id(class_id):
+        return None
+    estudio = _estudio_de(row)
+    status = _estado_visible(str(row.get("estado") or ""))
+    title, custom = _titulo_visible(row)
+    watched = engine.youtube_url(str(row.get("video_url") or ""))
+    return {
+        "id": class_id,
+        "title": title,
+        "materia": str(row.get("materia") or ""),
+        "status": status,
+        "stage": "ready" if status == "ready" else ("error" if status == "error" else "audio"),
+        "detail": str(row.get("detalle") or ""),
+        "error": str(row.get("detalle") or "Se detuvo.") if status == "error" else "",
+        "created": str(row.get("creado") or ""),
+        "fecha": engine.fecha_iso(str(estudio.get("fecha_clase") or "")),
+        "hora": engine.hora_valida(str(estudio.get("hora_clase") or "")),
+        "duration": row.get("duracion") or 0,
+        "title_custom": custom,
+        "profesor": cloud.profesor_limpio(estudio.get("profesor")),
+        "frames": [],
+        "started": _marca_creado(str(row.get("creado") or "")),
+        "media_kind": "youtube" if watched else "",
+        "media_src": watched,
+        "youtube_state": "listo" if watched else "",
+        "youtube_error": "",
+        "curso_id": str(row.get("curso_id") or ""),
+        "avisos": len(_avisos_de(estudio)),
+        "nube": True,
+    }
+
+
+def estado_nube(class_id: str) -> dict:
+    try:
+        row = cloud.leer_estado(class_id)
+    except engine.AppError:
+        row = None
+    tarjeta = tarjeta_nube(row)
+    if not tarjeta:
+        raise engine.AppError("No encuentro esa clase.")
+    return tarjeta
+
+
+def detalle_solo_nube(class_id: str) -> dict:
+    try:
+        row = cloud.leer_clase(class_id)
+    except engine.AppError:
+        row = None
+    tarjeta = tarjeta_nube(row)
+    if not tarjeta or not isinstance(row, dict):
+        raise engine.AppError("No encuentro esa clase.")
+    estudio = _estudio_de(row)
+    transcript = row.get("transcripcion") if isinstance(row.get("transcripcion"), dict) else {}
+    lines = transcript.get("lines") if isinstance(transcript.get("lines"), list) else []
+    chat = row.get("chat") if isinstance(row.get("chat"), list) else []
+    payload = dict(tarjeta)
+    payload["frames"] = cloud.marcos_firmados(class_id)
+    payload["study"] = estudio
+    payload["lines"] = lines
+    payload["chat"] = chat
+    payload["presentaciones"] = cloud.presentaciones_limpias(estudio.get("presentaciones"))
+    payload["lecturas"] = cloud.lecturas_limpias(estudio.get("lecturas"))
+    payload["profesor"] = cloud.profesor_limpio(estudio.get("profesor")) or payload.get("profesor") or ""
+    attach_courses([payload])
+    return payload
+
+
+def _leer_remoto(class_id: str) -> dict | None:
+    try:
+        return cloud.leer_clase(class_id)
+    except engine.AppError:
+        return None
+
+
 def list_classes() -> list[dict]:
-    if not CLASSES.is_dir():
-        return []
+    remotos = _filas_por_id()
     rows = []
-    for folder in CLASSES.iterdir():
-        if not (folder / "meta.json").is_file():
+    vistos: set[str] = set()
+    if CLASSES.is_dir():
+        for folder in CLASSES.iterdir():
+            if not (folder / "meta.json").is_file():
+                continue
+            try:
+                meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            study = read_json(folder / "study.json", None)
+            study_title = str(study.get("titulo") or "") if isinstance(study, dict) else ""
+            remote = remotos.get(folder.name)
+            try:
+                meta = absorber_meta(folder.name, meta, remote, study_title)
+                meta = completar_hora(folder.name, completar_fecha(folder.name, meta))
+            except engine.AppError:
+                pass
+            row = public_meta(meta)
+            row["curso_id"] = str(meta.get("curso_id") or "")
+            row["profesor"] = cloud.profesor_de_fuentes(meta, study, _estudio_de(remote))
+            if row.get("title_custom"):
+                titulo_portada = row.get("title") or ""
+            elif isinstance(study, dict) and study.get("titulo"):
+                titulo_portada = str(study.get("titulo") or "")
+            else:
+                titulo_portada = row.get("title") or ""
+            capturas = study.get("capturas") if isinstance(study, dict) else None
+            indice = cloud.indice_portada(titulo_portada, capturas)
+            foto = class_dir(folder.name) / "frames" / f"{indice:02d}.jpg" if indice else None
+            if foto is not None and foto.is_file():
+                row["portada"] = f"/media/{folder.name}/frames/{foto.name}"
+            locales = study.get("avisos") if isinstance(study, dict) else None
+            if isinstance(locales, list) and locales:
+                row["avisos"] = len(locales)
+            else:
+                remoto_n = len(_avisos_de(_estudio_de(remote)))
+                if remoto_n:
+                    row["avisos"] = remoto_n
+            rows.append(row)
+            vistos.add(folder.name)
+    for class_id, remote in remotos.items():
+        if class_id in vistos:
             continue
-        try:
-            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        meta = completar_hora(folder.name, completar_fecha(folder.name, meta))
-        row = public_meta(meta)
-        row["curso_id"] = str(meta.get("curso_id") or "")
-        study = read_json(folder / "study.json", None)
-        if isinstance(study, dict) and isinstance(study.get("avisos"), list):
-            row["avisos"] = len(study["avisos"])
-        rows.append(row)
+        tarjeta = tarjeta_nube(remote)
+        if tarjeta:
+            rows.append(tarjeta)
     rows.sort(key=lambda row: row.get("created") or "", reverse=True)
     return rows
 
@@ -417,9 +717,18 @@ def attach_courses(rows: list[dict]) -> list[dict]:
         remote = cloud.curso_por_clase()
     except engine.AppError:
         remote = {}
-    names = {item["id"]: item["nombre"] for item in course_catalog()["items"]}
+    items = course_catalog()["items"]
+    names = {item["id"]: item["nombre"] for item in items}
+    por_nombre = cloud.mapa_cursos(items)
     for row in rows:
-        curso_id = remote.get(str(row.get("id") or "")) or row.get("curso_id") or ""
+        fijado = ""
+        if row.get("materia_custom"):
+            fijado = por_nombre.get(cloud.nombre_clave(row.get("materia") or ""), "")
+        curso_id = cloud.elegir_curso_id(
+            str(row.get("curso_id") or ""),
+            remote.get(str(row.get("id") or ""), ""),
+            fijado,
+        )
         row["curso_id"] = curso_id
         row["curso"] = names.get(curso_id, "")
     return rows
@@ -503,6 +812,21 @@ def set_fecha(class_id: str, raw: str) -> dict:
     iso = engine.fecha_iso(raw)
     if not iso:
         raise engine.AppError("Escribe una fecha válida.")
+    try:
+        read_meta(class_id)
+    except engine.AppError:
+        cloud.save_fecha(class_id, iso, True)
+        row = _leer_remoto(class_id)
+        if isinstance(row, dict):
+            estudio = _estudio_de(row)
+            estudio["fecha_clase"] = iso
+            estudio["fecha_custom"] = True
+            row = dict(row)
+            row["estudio"] = estudio
+        tarjeta = tarjeta_nube(row) if isinstance(row, dict) else None
+        if not tarjeta:
+            raise engine.AppError("No encuentro esa clase.")
+        return tarjeta
     updated = update_meta(class_id, fecha=iso, fecha_custom=True, fecha_origen="edit")
     try:
         cloud.save_fecha(class_id, iso, True)
@@ -566,9 +890,32 @@ def completar_horas() -> None:
             continue
 
 
+def _estudio_visible(meta: dict, study, remote: dict | None):
+    if _estudio_util(study) or str(meta.get("status") or "") == "processing" or not isinstance(remote, dict):
+        return study
+    estudio = _estudio_de(remote)
+    if not estudio:
+        return study
+    visible = dict(estudio)
+    ppt = cloud.presentaciones_limpias(meta.get("presentaciones"))
+    if ppt:
+        visible["presentaciones"] = ppt
+    if meta.get("title_custom") and meta.get("title"):
+        visible["titulo"] = meta.get("title")
+    return visible
+
+
 def class_detail(class_id: str) -> dict:
-    meta = completar_hora(class_id, completar_fecha(class_id, read_meta(class_id)))
+    try:
+        meta = read_meta(class_id)
+    except engine.AppError:
+        return detalle_solo_nube(class_id)
+    remote = _leer_remoto(class_id)
     folder = class_dir(class_id)
+    previo = read_json(folder / "study.json", None)
+    study_title = str(previo.get("titulo") or "") if isinstance(previo, dict) else ""
+    meta = absorber_meta(class_id, meta, remote, study_title)
+    meta = completar_hora(class_id, completar_fecha(class_id, meta))
     transcript = read_json(folder / "transcript.json", {})
     study = read_json(folder / "study.json", None)
     chat = read_json(folder / "chat.json", [])
@@ -590,14 +937,24 @@ def class_detail(class_id: str) -> dict:
         )
     if isinstance(study, dict):
         study = engine.place_youtube(study, lines)
-        study["links"] = engine.collect_links(study, lines)
-        changed = engine.stamp_points(study, meta.get("frames") or [], lines)
+        links = engine.collect_links(study, lines)
+        changed = links != study.get("links")
+        study["links"] = links
+        changed = engine.stamp_points(study, meta.get("frames") or [], lines) or changed
         changed = engine.stamp_topics(study, meta.get("frames") or [], lines) or changed
         if changed:
             (folder / "study.json").write_text(
                 json.dumps(study, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+    status = str(meta.get("status") or "")
+    study = _mezclar_estudio_local(class_id, meta, study, remote)
+    chat = _traer_chat(class_id, chat, remote, status)
+    if not lines and status != "processing" and isinstance(remote, dict):
+        remoto_tx = remote.get("transcripcion")
+        if isinstance(remoto_tx, dict) and isinstance(remoto_tx.get("lines"), list):
+            lines = remoto_tx["lines"]
+    visible = _estudio_visible(meta, study, remote)
     source = Path(meta.get("source") or "")
     payload = public_meta(meta)
     payload["curso_id"] = str(meta.get("curso_id") or "")
@@ -605,10 +962,24 @@ def class_detail(class_id: str) -> dict:
     if payload.get("media_kind") != "youtube":
         payload["media_kind"] = media_kind(source)
         payload["media_src"] = ""
+    if not payload.get("frames"):
+        payload["frames"] = cloud.marcos_firmados(class_id)
+    diapositivas = cloud.presentaciones_limpias(meta.get("presentaciones"))
+    if not diapositivas and isinstance(visible, dict):
+        diapositivas = cloud.presentaciones_limpias(visible.get("presentaciones"))
+    lecturas = cloud.lecturas_limpias(meta.get("lecturas"))
+    if not lecturas and isinstance(visible, dict):
+        lecturas = cloud.lecturas_limpias(visible.get("lecturas"))
+    profesor = cloud.profesor_limpio(meta.get("profesor"))
+    if not profesor and isinstance(visible, dict):
+        profesor = cloud.profesor_limpio(visible.get("profesor"))
     payload.update({
-        "study": study,
+        "study": visible,
         "lines": lines,
         "chat": chat if isinstance(chat, list) else [],
+        "presentaciones": diapositivas,
+        "lecturas": lecturas,
+        "profesor": profesor,
     })
     return payload
 
@@ -721,6 +1092,19 @@ def run_job(class_id: str) -> None:
             saved_title = model_title
         study["titulo"] = saved_title
         course = engine.apply_course(fresh, study)
+        reloj = engine.hora_valida(str(fresh.get("hora") or ""))
+        if reloj:
+            study["hora_clase"] = reloj
+        docente = cloud.profesor_limpio(fresh.get("profesor"))
+        if docente:
+            study["profesor"] = docente
+        for clave, limpiar in (
+            ("presentaciones", cloud.presentaciones_limpias),
+            ("lecturas", cloud.lecturas_limpias),
+        ):
+            archivos = limpiar(fresh.get(clave))
+            if archivos:
+                study[clave] = archivos
         (folder / "study.json").write_text(json.dumps(study, ensure_ascii=False, indent=2), encoding="utf-8")
         update_meta(
             class_id,
@@ -942,7 +1326,20 @@ def recordar_fuentes() -> None:
             traceback.print_exc()
 
 
-def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = "") -> str:
+def create_class_from_url(
+    url: str,
+    materia: str,
+    terms: str,
+    curso_id: str = "",
+    titulo: str = "",
+    fecha: str = "",
+    hora: str = "",
+    fijar_materia: bool = False,
+    desde_clementina: bool = False,
+    presentaciones: list | None = None,
+    lecturas: list | None = None,
+    profesor: str = "",
+) -> str:
     cleaned = cloud.assert_zoom_url(url)
     exigir_unico(cloud.fuentes_de_url(cleaned))
     class_id = new_id()
@@ -951,9 +1348,10 @@ def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = ""
     dest = folder / "work" / "fuente.mp4"
     try:
         cloud.download(cleaned, dest)
+        title = " ".join(str(titulo or "").split())[:140]
         meta = {
             "id": class_id,
-            "title": "Clase por enlace",
+            "title": title or "Clase por enlace",
             "source": str(dest.resolve()),
             "video_url": cleaned,
             "materia": materia.strip()[:120],
@@ -969,12 +1367,35 @@ def create_class_from_url(url: str, materia: str, terms: str, curso_id: str = ""
             "started": int(datetime.now().timestamp()),
             "curso_id": cloud._curso_id(curso_id),
         }
+        if title:
+            meta["title_custom"] = True
+            meta["titulo_en"] = int(datetime.now().timestamp())
+        if fijar_materia and materia.strip():
+            meta["materia_custom"] = True
         iso, origin = engine.fecha_de_video(dest, usar_mtime=False)
         if iso:
             meta["fecha"] = iso
             meta["fecha_origen"] = origin
             meta["fecha_custom"] = False
-        anotar_hora(meta, dest, usar_mtime=False)
+        cita = engine.fecha_iso(fecha)
+        if cita:
+            meta["fecha"] = cita
+            meta["fecha_origen"] = "clementina"
+            meta["fecha_custom"] = True
+        inicio = engine.hora_valida(hora)
+        if inicio:
+            meta["hora"] = inicio
+        elif not desde_clementina:
+            anotar_hora(meta, dest, usar_mtime=False)
+        diapositivas = cloud.presentaciones_limpias(presentaciones)
+        if diapositivas:
+            meta["presentaciones"] = diapositivas
+        docs = cloud.lecturas_limpias(lecturas)
+        if docs:
+            meta["lecturas"] = docs
+        docente = cloud.profesor_limpio(profesor)
+        if docente:
+            meta["profesor"] = docente
         meta["fuentes"] = cloud.fuentes_de_meta(meta)
         write_meta(class_id, meta)
         print(f"[ClaseClara] empieza {class_id} desde un enlace", flush=True)
@@ -1224,6 +1645,24 @@ def rename_class(class_id: str, title: str, materia: str) -> dict:
     cleaned = " ".join(title.split())[:140]
     if not cleaned:
         raise engine.AppError("Escribe un nombre.")
+    try:
+        meta = read_meta(class_id)
+    except engine.AppError:
+        cloud.guardar_titulo(class_id, cleaned, materia)
+        row = _leer_remoto(class_id)
+        if isinstance(row, dict):
+            row = dict(row)
+            row["titulo"] = cleaned
+            row["materia"] = " ".join(str(materia or "").split())[:120]
+            estudio = _estudio_de(row)
+            estudio["titulo"] = cleaned
+            estudio["titulo_custom"] = True
+            estudio["titulo_en"] = int(datetime.now().timestamp())
+            row["estudio"] = estudio
+        tarjeta = tarjeta_nube(row) if isinstance(row, dict) else None
+        if not tarjeta:
+            raise engine.AppError("No encuentro esa clase.")
+        return tarjeta
     meta = read_meta(class_id)
     custom = bool(meta.get("title_custom")) or cleaned != (meta.get("title") or "").strip()
     changes = {
@@ -1249,16 +1688,24 @@ def rename_class(class_id: str, title: str, materia: str) -> dict:
 
 def remove_class(class_id: str) -> None:
     folder = class_dir(class_id)
-    if not folder.is_dir():
-        raise engine.AppError("No encuentro esa clase.")
     if class_id in ACTIVE:
         CANCELLED.add(class_id)
         return
-    shutil.rmtree(folder, ignore_errors=True)
+    if folder.is_dir():
+        shutil.rmtree(folder, ignore_errors=True)
+        try:
+            cloud.remove(class_id)
+        except Exception:
+            traceback.print_exc()
+        return
+    row = _leer_remoto(class_id)
+    if not tarjeta_nube(row):
+        raise engine.AppError("No encuentro esa clase.")
     try:
         cloud.remove(class_id)
     except Exception:
         traceback.print_exc()
+        raise engine.AppError("No pude borrar esa clase.")
 
 
 def retry_class(class_id: str, retranscribe: bool) -> None:
@@ -1471,6 +1918,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/":
                 self._send_path(STATIC / "index.html", "text/html; charset=utf-8")
                 return
+            if path in ("/LINKEODECLASESCLARA", "/LINKEODECLASESCLARA.html"):
+                self._send_path(STATIC / "LINKEODECLASESCLARA.html", "text/html; charset=utf-8")
+                return
             static = static_target(path)
             if static is not None:
                 self._send_path(static, guess_type(static))
@@ -1479,14 +1929,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, status_payload())
                 return
             if path == "/api/classes":
-                self._json(200, {"classes": attach_courses(list_classes()), "cursos": course_catalog()})
+                try:
+                    orden = cloud.leer_orden()
+                except engine.AppError:
+                    orden = {}
+                self._json(200, {
+                    "classes": attach_courses(list_classes()),
+                    "cursos": course_catalog(),
+                    "orden": orden,
+                })
                 return
             if path == "/api/zoom":
                 self._json(200, {"recordings": zoom_recordings()})
                 return
             job = re.fullmatch(r"/api/jobs/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})", path)
             if job:
-                self._json(200, public_meta(read_meta(job.group(1))))
+                class_id = job.group(1)
+                try:
+                    payload = public_meta(read_meta(class_id))
+                except engine.AppError:
+                    payload = estado_nube(class_id)
+                self._json(200, payload)
                 return
             detail = re.fullmatch(r"/api/classes/([0-9]{8}-[0-9]{6}-[0-9a-f]{6})", path)
             if detail:
@@ -1517,6 +1980,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
+            if path == "/api/linkeo":
+                self._json(200, leer_clementina(self._read_json()))
+                return
             if path == "/api/settings":
                 body = self._read_json()
                 self._json(200, store_settings(body))
@@ -1543,6 +2009,12 @@ class Handler(BaseHTTPRequestHandler):
                     "error": cloud.aviso_duplicado(found.get("titulo") or "Clase", found.get("tipo") or "video"),
                     "tipo": found.get("tipo") or "video",
                 })
+                return
+            if path == "/api/classes/order":
+                body = self._read_json()
+                ids = body.get("ids") if isinstance(body.get("ids"), list) else []
+                cloud.guardar_orden_curso(str(body.get("curso_id") or ""), ids)
+                self._json(200, {"ok": True})
                 return
             if path == "/api/classes":
                 body = self._read_json()
@@ -1793,6 +2265,39 @@ def serve(open_browser: bool = True) -> None:
         server.server_close()
 
 
+def leer_clementina(body: dict) -> dict:
+    """Lee Clementina en esta PC. La contraseña no se guarda."""
+    usuario = " ".join(str(body.get("usuario") or "").split())
+    clave = str(body.get("clave") or "")
+    if not usuario or not clave or len(usuario) > 200 or len(clave) > 200:
+        raise engine.AppError("Escribe tu usuario y tu contraseña de Clementina.")
+    node = shutil.which("node")
+    if not node:
+        raise engine.AppError("No encuentro Node en esta computadora.")
+    script = ROOT / "netlify" / "functions" / "linkeo-leer.mjs"
+    try:
+        done = subprocess.run(
+            [node, str(script), "--leer"],
+            input=json.dumps({"usuario": usuario, "clave": clave}).encode("utf-8"),
+            capture_output=True,
+            timeout=240,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise engine.AppError("Clementina tardó demasiado.") from exc
+    raw = done.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        data = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        data = {}
+    if done.returncode != 0 or not isinstance(data, dict) or data.get("error"):
+        message = str(data.get("error") or "No pude leer Clementina.") if isinstance(data, dict) else "No pude leer Clementina."
+        raise engine.AppError(message[:180])
+    if not isinstance(data.get("cursos"), list):
+        raise engine.AppError("No pude leer Clementina.")
+    return data
+
+
 def static_target(path: str) -> Path | None:
     rel = path[len("/static/"):] if path.startswith("/static/") else path.lstrip("/")
     if not rel or rel.endswith("/"):
@@ -1854,6 +2359,10 @@ def self_test() -> None:
             page = response.read()
             assert response.status == 200
             assert b"ClaseClara" in page
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/LINKEODECLASESCLARA") as response:
+            linkeo = response.read()
+            assert b"LINKEODECLASESCLARA" in linkeo
+            assert b"/api/linkeo" in linkeo
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/static/styles.css") as response:
             assert b"--ink" in response.read()
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status") as response:

@@ -7,6 +7,9 @@
   to = "/LINKEODECLASESCLARA.html"
   status = 200
 
+# El escaneo lo dispara linkeo-turno.mjs a las 00:00, 12:00 y 18:00 de Lima.
+# LINKEO_USUARIO y LINKEO_CLAVE viven en las variables de las funciones, no aquí.
+
 [build.environment]
   NODE_VERSION = "20"
   # La clave anon es pública. La contraseña no se escribe en el sitio.

@@ -372,6 +372,104 @@
     return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : "";
   }
 
+  function nombreProfesor(value) {
+    const texto = String(value || "").replace(/\s+/g, " ").trim();
+    if (!texto || texto.toLowerCase() === "sin profesor visible") return "";
+    return texto.slice(0, 160);
+  }
+
+  function idsDeClase(ids) {
+    const clean = [];
+    const seen = new Set();
+    for (const raw of ids || []) {
+      const id = String(raw || "");
+      if (!/^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      clean.push(id);
+    }
+    return clean;
+  }
+
+  async function portadasDe(cards) {
+    const clean = idsDeClase((cards || []).map((item) => item && item.id));
+    if (!clean.length) return {};
+    let rows = [];
+    try {
+      rows = await rest(
+        "GET",
+        `/rest/v1/diapositivas?clase_id=in.(${clean.join(",")})&select=clase_id,orden,imagen_path&order=orden.asc`,
+      ) || [];
+    } catch {
+      const partes = await Promise.all(clean.map(async (id) => {
+        try {
+          return await rest(
+            "GET",
+            `/rest/v1/diapositivas?clase_id=eq.${id}&select=clase_id,orden,imagen_path&order=orden.asc`,
+          ) || [];
+        } catch {
+          return [];
+        }
+      }));
+      rows = partes.flat();
+    }
+    const porClase = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const id = row && row.clase_id;
+      const path = String((row && row.imagen_path) || "");
+      const orden = Number(row && row.orden);
+      if (!id || !path || path.includes("..") || !Number.isFinite(orden)) continue;
+      if (!porClase.has(id)) porClase.set(id, []);
+      porClase.get(id).push({ orden, path });
+    }
+    const pedidos = [];
+    for (const item of cards || []) {
+      const buscado = Number(item && item.portada_orden);
+      if (!item || !Number.isInteger(buscado) || buscado < 1) continue;
+      const elegido = (porClase.get(item.id) || []).find((slide) => slide.orden === buscado);
+      if (elegido) pedidos.push([item.id, elegido.path]);
+    }
+    const pares = await Promise.all(pedidos.map(async ([id, path]) => {
+      try {
+        const url = await sign(path);
+        return [id, /^https:\/\//i.test(url) ? url : ""];
+      } catch {
+        return [id, ""];
+      }
+    }));
+    const salida = {};
+    for (const [id, url] of pares) {
+      if (url) salida[id] = url;
+    }
+    return salida;
+  }
+
+  async function marcarProfesores(pack, estudio) {
+    if (!pack || !Array.isArray(pack.items) || !estudio) return;
+    let rows = [];
+    try {
+      const select = selectDe("curso_id,universidad,carrera,estudio_profesor:estudio->profesor");
+      rows = await rest("GET", `/rest/v1/clases?select=${select}`) || [];
+    } catch {
+      rows = [];
+    }
+    const vistos = {};
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row || row.universidad !== estudio.universidad || row.carrera !== estudio.carrera) continue;
+      const id = row.curso_id;
+      if (!id || vistos[id]) continue;
+      const nombre = nombreProfesor(row.estudio_profesor);
+      if (nombre) vistos[id] = nombre;
+    }
+    pack.items = pack.items.map((item) => ({
+      id: item.id,
+      nombre: item.nombre,
+      profesor: vistos[item.id] || nombreProfesor(item.profesor),
+    }));
+    const actual = pack.items.find((item) => item.id === pack.activo);
+    pack.nombre = actual ? actual.nombre : "";
+    window.CLASECLARA_CURSOS = pack;
+  }
+
   function card(row) {
     const estado = row.estado || "lista";
     const started = Date.parse(row.creado || "");
@@ -385,6 +483,8 @@
     const titulo = custom
       ? (estudioTitulo || row.titulo || "Clase")
       : (row.titulo || estudioTitulo || "Clase");
+    const capturas = Array.isArray(estudio.capturas) ? estudio.capturas : row.estudio_capturas;
+    const portadaOrden = typeof indicePortada === "function" ? indicePortada(titulo, capturas) : 0;
     return {
       id: row.id,
       title: titulo,
@@ -401,6 +501,8 @@
       duration: row.duracion || 0,
       avisos,
       title_custom: custom,
+      profesor: nombreProfesor(estudio.profesor || row.estudio_profesor),
+      portada_orden: portadaOrden,
       media_kind: watch ? "youtube" : (remote ? "video" : ""),
       media_src: watch || remote,
       youtube_state: watch ? "listo" : "",
@@ -1037,17 +1139,30 @@
       const cursos = await cursosDeEstudio();
       const pack = publicarCursos(cursos, readCursoId());
       if (!pack.activo) return { classes: [], cursos: pack };
-      const select = selectDe("id,titulo,materia,universidad,carrera,curso_id,duracion,estado,detalle,creado,estudio_titulo:estudio->titulo,estudio_custom:estudio->titulo_custom,estudio_fecha:estudio->fecha_clase,estudio_hora:estudio->hora_clase,estudio_avisos:estudio->avisos");
-      const rows = await rest("GET", `/rest/v1/clases?select=${select}&curso_id=eq.${pack.activo}&order=creado.desc`);
       const estudio = estudioActual();
+      const select = selectDe("id,titulo,materia,universidad,carrera,curso_id,video_url,duracion,estado,detalle,creado,estudio_titulo:estudio->titulo,estudio_custom:estudio->titulo_custom,estudio_fecha:estudio->fecha_clase,estudio_hora:estudio->hora_clase,estudio_profesor:estudio->profesor,estudio_capturas:estudio->capturas,estudio_avisos:estudio->avisos");
+      const [rows, orden] = await Promise.all([
+        rest("GET", `/rest/v1/clases?select=${select}&curso_id=eq.${pack.activo}&order=creado.desc`),
+        loadOrden(),
+        marcarProfesores(pack, estudio),
+      ]);
       const list = (Array.isArray(rows) ? rows : []).filter((row) => (
         estudio
         && row.universidad === estudio.universidad
         && row.carrera === estudio.carrera
         && row.curso_id === pack.activo
       ));
-      const orden = await loadOrden();
-      return { classes: ordenarClases(list.map(card), orden[pack.activo]), cursos: pack };
+      const cards = list.map(card);
+      try {
+        const fotos = await portadasDe(cards);
+        for (const item of cards) {
+          if (fotos[item.id]) item.portada = fotos[item.id];
+          delete item.portada_orden;
+        }
+      } catch {
+        for (const item of cards) delete item.portada_orden;
+      }
+      return { classes: ordenarClases(cards, orden[pack.activo]), cursos: pack };
     }
     if (url === "/api/classes/order" && method === "POST") {
       const body = JSON.parse((options && options.body) || "{}");
@@ -2353,6 +2468,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     const items = (Array.isArray(rows) ? rows : []).map((item) => ({
       id: item.id,
       nombre: item.nombre,
+      profesor: nombreProfesor(item.profesor),
     }));
     const id = items.some((item) => item.id === activo) ? activo : (items[0] ? items[0].id : "");
     writeCursoId(id);
@@ -2417,7 +2533,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       errorCurso(error, "No pude renombrar el curso.");
     }
     const rows = (window.CLASECLARA_CURSOS?.items || []).map((item) => (
-      item.id === id ? { id: item.id, nombre: limpio } : item
+      item.id === id ? { id: item.id, nombre: limpio, profesor: item.profesor || "" } : item
     ));
     return publicarCursos(rows, readCursoId());
   }
