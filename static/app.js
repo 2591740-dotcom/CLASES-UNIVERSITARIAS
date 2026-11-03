@@ -843,6 +843,66 @@ function cabezaLista(titulo, hay) {
   return `<div class="list-head"><h2>${esc(titulo)}</h2>${boton}</div>`;
 }
 
+const AVISO_MES = "El día 5 de cada mes se retiran las clases del mes anterior.";
+
+function instanteMes(valor) {
+  const text = String(valor || "").trim();
+  if (!text) return 0;
+  const conZona = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(text);
+  const marca = conZona || !/^\d{4}-\d{2}-\d{2}T/.test(text) ? text : `${text}Z`;
+  const parsed = Date.parse(marca);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function epochDeIdMes(classId) {
+  const match = String(classId || "").match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{6}$/);
+  if (!match) return 0;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return 0;
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const visto = new Date(utc);
+  if (visto.getUTCFullYear() !== year || visto.getUTCMonth() !== month - 1 || visto.getUTCDate() !== day) return 0;
+  return utc + 5 * 3600 * 1000;
+}
+
+function corteMesVisible(epochMs) {
+  const lima = new Date(Number(epochMs) - 5 * 3600 * 1000);
+  return {
+    dia: lima.getUTCDate(),
+    inicio: Date.UTC(lima.getUTCFullYear(), lima.getUTCMonth(), 1, 5, 0, 0),
+  };
+}
+
+function claseMesAnterior(item, inicio) {
+  if (!item) return false;
+  const stamp = instanteMes(item.created) || epochDeIdMes(item.id);
+  return Boolean(stamp) && stamp < inicio;
+}
+
+function cursoSeRetira(classes, epochMs) {
+  const list = Array.isArray(classes) ? classes : [];
+  if (!list.length) return false;
+  const inicio = corteMesVisible(epochMs).inicio;
+  return list.every((item) => claseMesAnterior(item, inicio));
+}
+
+function avisoCursoMes(classes, epochMs = Date.now()) {
+  if (!cursoSeRetira(classes, epochMs)) return "";
+  const plazo = corteMesVisible(epochMs).dia < 5 ? " Hasta ese día puedes repasarlo." : "";
+  return `Este curso es del mes anterior. El día 5 de este mes se retira, con sus clases y videos, para respetar los derechos de autor.${plazo} ClaseClara guarda cada mes solo para el repaso.`;
+}
+
+function avisoMesHtml(classes) {
+  const propio = avisoCursoMes(classes);
+  const banner = propio ? `<aside class="mes-curso"><p>${esc(propio)}</p></aside>` : "";
+  return `${banner}<p class="mes-aviso">${esc(AVISO_MES)}</p>`;
+}
+
 function cursoCapsula(nombre) {
   return `<div class="curso-linea"><button class="capsule" id="curso-capsula" type="button">${esc(nombre || "Curso")}</button><p class="curso-aviso">Selecciona el curso</p></div>`;
 }
@@ -863,6 +923,7 @@ function phoneHome(classes, cursos) {
       ${cursoCapsula(pack.nombre)}
       <p class="note curso-profesor">${esc(profesorDelCurso(pack.activo, list))}</p>
       <h1>La mejor forma de Aprender.</h1>
+      ${avisoMesHtml(list)}
     </section>
     ${cabezaLista(pack.nombre || "Clases", list.length > 0)}
     <div class="grid">${mine}</div>`;
@@ -2488,6 +2549,7 @@ function studyHtml(data) {
             ${when ? `<p class="kicker">${esc(when)}</p>` : ""}
             <button class="capsule" id="clase-curso" type="button">${esc(data.curso || "Curso")}</button>
             <p class="note" id="clase-profesor">${esc(docente)}</p>
+            ${window.claseClaraCloud ? `<p class="mes-aviso">${esc(AVISO_MES)}</p>` : ""}
             <h1 id="class-heading">${esc(shownTitle)}</h1>
             <p class="idea">${esc(study.idea || "")}</p>
           </div>

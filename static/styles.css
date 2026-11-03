@@ -333,6 +333,22 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
   border: 1px solid #f0d7bc;
 }
 
+.mes-aviso {
+  margin: 12px 0 0;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.mes-curso {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--brass-soft);
+  border: 1px solid #f0d7bc;
+}
+
+.mes-curso p { margin: 0; }
+
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 .card {
@@ -1193,7 +1209,8 @@ html[data-fondo="oscuro"] .fondo .texty.on {
   color: var(--on-solid);
 }
 
-html[data-fondo="oscuro"] .banner {
+html[data-fondo="oscuro"] .banner,
+html[data-fondo="oscuro"] .mes-curso {
   background: #2a2118;
   border-color: #5c4632;
 }
