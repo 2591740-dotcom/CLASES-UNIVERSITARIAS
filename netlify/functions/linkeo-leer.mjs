@@ -61,11 +61,27 @@ function aplanar(prefijo, value, params) {
   if (value !== undefined && value !== null) params.set(prefijo, String(value));
 }
 
+function pistaDe(texto, status) {
+  const crudo = String(texto || "").replace(/^\uFEFF/, "").trim();
+  if (!crudo) return `respuesta vacía (${status || 0})`;
+  const titulo = crudo.match(/<title[^>]*>([^<]{1,80})/i);
+  const aviso = titulo ? textoPlano(titulo[1]).slice(0, 80) : "";
+  if (aviso && !/password|contrase|token|stack/i.test(aviso)) return `${status || 0}, ${aviso}`;
+  if (crudo.startsWith("<")) return `${status || 0}, html`;
+  return `${status || 0}, no es json`;
+}
+
 async function pedirJson(url, options, pedir) {
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": _UA_MOVIL,
+    ...(options && options.headers || {}),
+  };
   let response;
   try {
     response = await pedir(url, {
       ...options,
+      headers,
       redirect: "manual",
       signal: AbortSignal.timeout(20000),
     });
@@ -78,9 +94,9 @@ async function pedirJson(url, options, pedir) {
   const text = await response.text();
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(String(text || "").replace(/^\uFEFF/, "").trim());
   } catch {
-    throw new Fallo("Clementina contestó algo que no pude leer.");
+    throw new Fallo(`Clementina contestó algo que no pude leer (${pistaDe(text, response.status)}).`);
   }
   if (!response.ok) throw new Fallo(mensajeAcceso(data));
   if (data && (data.exception || data.errorcode && data.error)) {
@@ -1593,6 +1609,7 @@ async function selfTest() {
     if (destino.includes("/login/token.php")) {
       assert(options.body.get("username") === "ada", "usuario");
       assert(options.body.get("password") === "secreta", "clave");
+      assert(options.headers["User-Agent"] === "MoodleMobile", "entra como la app");
       return respuestaJson({ token: "a".repeat(32) });
     }
     if (destino.includes("core_webservice_get_site_info")) return respuestaJson({ userid: 3, fullname: "Ada" });
@@ -2319,6 +2336,17 @@ async function selfTest() {
     assert(false, "debió rechazar la clave");
   } catch (error) {
     assert(error.publico && error.message.includes("no aceptó") && !error.message.includes("mala"), "aviso de clave");
+  }
+  try {
+    await entrarYLeer("ada", "secreta", async () => ({
+      status: 403,
+      ok: false,
+      headers: { get: () => null },
+      text: async () => "<html><title>Access denied</title></html>",
+    }));
+    assert(false, "debió avisar que la respuesta no es json");
+  } catch (error) {
+    assert(error.publico && error.message.includes("Access denied") && !error.message.includes("secreta"), "dice el título de la página");
   }
 
   const halladas = [
