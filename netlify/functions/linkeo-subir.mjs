@@ -610,6 +610,25 @@ function clavesDeFila(row) {
   return keys;
 }
 
+export function yaSubida(clave, filas, olvidadas) {
+  if (!clave) return false;
+  if (olvidadas && olvidadas.has(clave)) return true;
+  return (filas || []).some((row) => clavesDeFila(row).includes(clave));
+}
+
+async function clavesOlvidadas() {
+  const { url, secret } = nube();
+  if (!url || !secret) throw new Aviso("nube");
+  const response = await fetch(`${url}/storage/v1/object/diapositivas/ajustes/linkeo-mes.json`, {
+    headers: { apikey: secret, Authorization: `Bearer ${secret}` },
+  });
+  if (response.status === 400 || response.status === 404) return new Set();
+  if (!response.ok) throw new Aviso("nube");
+  const data = await response.json().catch(() => ({}));
+  const claves = Array.isArray(data && data.claves) ? data.claves : [];
+  return new Set(claves.map((item) => String(item || "")));
+}
+
 async function listarClases() {
   const rows = await rest("/rest/v1/clases?select=id,titulo,video_url,estudio,curso_id");
   return Array.isArray(rows) ? rows : [];
@@ -758,12 +777,13 @@ export async function subirUna(lectura, epoch = Math.floor(Date.now() / 1000), p
   const omitidos = new Set(Array.isArray(lectura && lectura.omitidos) ? lectura.omitidos : []);
   const propias = new Set(Array.isArray(lectura && lectura.propias) ? lectura.propias : []);
   const filas = await listarClases();
+  const olvidadas = await clavesOlvidadas();
   let ya = 0;
   const pendientes = [];
   for (const item of entradasDe(cursos, epoch)) {
     const clave = fuenteZoom(item.url);
     if (!clave || omitidos.has(clave) || propias.has(clave)) continue;
-    if (filas.some((row) => clavesDeFila(row).includes(clave))) {
+    if (yaSubida(clave, filas, olvidadas)) {
       ya += 1;
       continue;
     }
@@ -840,6 +860,9 @@ async function selfTest() {
   const play = "https://ucv-edu-pe.zoom.us/rec/play/tokenPlay12";
   assert(fuenteZoom(play) === "zoom:ucv-edu-pe.zoom.us/tokenPlay12", "clave de la grabación");
   assert(fuenteZoom("https://zoom.us/j/123") === "", "la reunión en vivo no entra");
+  const olvidada = new Set(["zoom:ucv-edu-pe.zoom.us/tokenPlay12"]);
+  assert(yaSubida("zoom:ucv-edu-pe.zoom.us/tokenPlay12", [], olvidada), "la grabación ya borrada no se vuelve a subir");
+  assert(!yaSubida("zoom:ucv-edu-pe.zoom.us/otraClave1", [], olvidada), "otra grabación sí puede entrar");
   const ahora = Date.parse("2026-11-02T18:00:00Z") / 1000;
   const cursos = [{
     nombre: "Salud pública",

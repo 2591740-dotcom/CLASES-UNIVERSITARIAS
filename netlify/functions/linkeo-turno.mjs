@@ -138,6 +138,20 @@ export function autorizado(header, secret) {
   return mismo(header, secret);
 }
 
+async function avisarMes(epoch) {
+  const lima = new Date(Number(epoch) * 1000 - 5 * 3600 * 1000);
+  if (lima.getUTCDate() < 5) return;
+  const { corteMes } = await import("./linkeo-mes.mjs");
+  if (!corteMes(epoch).actuar) return;
+  const sitio = env("URL").replace(/\/$/, "");
+  const secret = env("SUPABASE_SERVICE_ROLE");
+  if (!sitio || !secret) return;
+  await fetch(`${sitio}/linkeo-mes`, {
+    method: "POST",
+    headers: { "x-linkeo-turno": secret },
+  }).catch(() => {});
+}
+
 export default async (req) => {
   const ahora = Math.floor(Date.now() / 1000);
   const actual = await leerNube();
@@ -153,6 +167,7 @@ export default async (req) => {
     if (!usuario || !clave || !sitio || !secret) {
       presencia.turno = { ...paso.turno, estado: "sinclave" };
       await guardarNube(presencia);
+      await avisarMes(ahora);
       return Response.json({ donde: "web", motivo: "sinclave" });
     }
     await guardarNube(presencia);
@@ -161,6 +176,7 @@ export default async (req) => {
       headers: { "x-linkeo-turno": secret },
     }).catch(() => {});
   }
+  await avisarMes(ahora);
   return Response.json({ donde: paso.accion === "pedir" ? "pc" : paso.accion, id: paso.turno && paso.turno.id });
 };
 

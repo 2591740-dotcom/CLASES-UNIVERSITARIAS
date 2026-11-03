@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -16,7 +17,11 @@ import engine
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "data" / "youtube.json"
 CHUNK = 8 * 1024 * 1024
-UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
+UPLOAD_SCOPE = (
+    "https://www.googleapis.com/auth/youtube.upload "
+    "https://www.googleapis.com/auth/youtube.readonly "
+    "https://www.googleapis.com/auth/youtube.force-ssl"
+)
 _ACCESS = {"token": "", "until": 0.0}
 
 
@@ -119,6 +124,43 @@ def _access_token() -> str:
     return token
 
 
+def _id_video(value: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", text):
+        return text
+    return ""
+
+
+def borrar_video(video_id: str) -> str:
+    """Borra un video del canal. «permiso» significa que la cuenta aún no puede borrarlos."""
+    video_id = _id_video(video_id)
+    if not video_id or not configured():
+        return "nada"
+    try:
+        token = _access_token()
+    except engine.AppError:
+        return "nada"
+    pedido = urllib.request.Request(
+        "https://www.googleapis.com/youtube/v3/videos?id=" + urllib.parse.quote(video_id),
+        method="DELETE",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(pedido, timeout=30) as response:
+            if response.status in {200, 204}:
+                return "borrado"
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        if exc.code in {200, 204, 404}:
+            return "borrado"
+        if exc.code == 403:
+            return "permiso"
+        return "falla"
+    except urllib.error.URLError:
+        return "falla"
+    return "falla"
+
+
 def _channel_name(token: str) -> str:
     request = urllib.request.Request(
         "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
@@ -190,12 +232,27 @@ def connect(client_id: str, client_secret: str) -> dict:
     channel = _channel_name(access)
     _ACCESS["token"] = access
     _ACCESS["until"] = time.time() + int(raw.get("expires_in") or 3500)
-    _save({
+    guardado = {
         "client_id": client_id,
         "client_secret": client_secret,
         "refresh_token": refresh,
         "channel": channel,
-    })
+    }
+    _save(guardado)
+    try:
+        import cloud
+        cloud.guardar_privado("youtube.json", guardado)
+    except engine.AppError as exc:
+        raise engine.AppError("El canal quedó en esta PC, pero no pude dejarlo listo para la web.") from exc
+    try:
+        import cloud
+        estado = cloud.leer_mes()
+        if estado.get("videos"):
+            estado["videoDia"] = ""
+            cloud.guardar_mes(estado)
+            cloud._soltar_videos(cloud.leer_mes(), cloud.dia_lima(time.time()))
+    except Exception:
+        pass
     return public_status()
 
 
@@ -319,4 +376,10 @@ def self_test() -> None:
     assert body["status"]["selfDeclaredMadeForKids"] is False
     assert body["snippet"]["title"] == "Clase larga"
     assert content_range(0, 7, 20) == "bytes 0-7/20"
+    assert "youtube.upload" in UPLOAD_SCOPE
+    assert "youtube.readonly" in UPLOAD_SCOPE
+    assert "youtube.force-ssl" in UPLOAD_SCOPE
+    assert _id_video("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert _id_video("corto") == ""
+    assert _id_video("tiene espacio") == ""
     assert public_status()["connected"] in {True, False}

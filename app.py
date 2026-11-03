@@ -1243,6 +1243,9 @@ def filas_locales() -> list[dict]:
 
 
 def duplicado_de(claves, excepto: str = "") -> dict | None:
+    olvidada = cloud.olvidada_de(claves)
+    if olvidada and str(olvidada.get("id") or "") != excepto:
+        return olvidada
     rows = filas_locales()
     try:
         rows.extend(cloud.filas_fuentes())
@@ -1575,6 +1578,10 @@ def watch_cloud() -> None:
     except Exception:
         traceback.print_exc()
     try:
+        cloud.olvidar_mes()
+    except Exception:
+        traceback.print_exc()
+    try:
         recordar_fuentes()
     except Exception:
         traceback.print_exc()
@@ -1584,8 +1591,12 @@ def watch_cloud() -> None:
             print(f"[ClaseClara] {count} clases publicadas en Supabase", flush=True)
     except Exception:
         traceback.print_exc()
+    revisado = time.time()
     while True:
         try:
+            if time.time() - revisado >= 3600:
+                revisado = time.time()
+                cloud.olvidar_mes()
             sync_settings()
             adopt_pending()
             rescue_cloud()

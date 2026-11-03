@@ -266,9 +266,30 @@ def servir_acceso() -> None:
     server.serve_forever()
 
 
+_FALLO_MES = {"en": 0.0}
+
+
+def cuidar_mes(marca: str) -> str:
+    hoy = cloud.dia_lima(time.time())
+    if marca == hoy or time.time() - _FALLO_MES["en"] < 3600:
+        return marca
+    try:
+        resultado = cloud.olvidar_mes()
+    except Exception as exc:
+        _FALLO_MES["en"] = time.time()
+        print(f"[TURNO] no pude cerrar el mes {type(exc).__name__}", flush=True)
+        return marca
+    if resultado == "ocupa":
+        _FALLO_MES["en"] = time.time()
+        return marca
+    return hoy
+
+
 def loop() -> None:
+    marca = ""
     while True:
         try:
+            marca = cuidar_mes(marca)
             mirar()
         except Exception as exc:
             print(f"[TURNO] no pude avisar {type(exc).__name__}", flush=True)

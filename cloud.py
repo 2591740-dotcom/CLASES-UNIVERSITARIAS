@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import engine
@@ -521,6 +522,8 @@ def _titulo_remoto(row: dict) -> tuple[str, bool, int]:
 def publish(class_id: str) -> None:
     if not configured() or not _valid_id(class_id):
         return
+    if mes_bloquea(class_id):
+        return
     folder = CLASSES / class_id
     meta_path = folder / "meta.json"
     if not meta_path.is_file():
@@ -725,7 +728,7 @@ def publish_ready() -> int:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if meta.get("status") == "ready":
+        if meta.get("status") == "ready" and not mes_bloquea(folder.name):
             publish(folder.name)
             count += 1
     return count
@@ -1618,7 +1621,7 @@ def leer_orden() -> dict:
     return orden_limpio(raw)
 
 
-_AJUSTES_TURNO = {"linkeo-turno.json", "linkeo-lectura.json"}
+_AJUSTES_TURNO = {"linkeo-turno.json", "linkeo-lectura.json", "linkeo-mes.json"}
 
 
 def _ajuste_turno(nombre: str) -> str:
@@ -1649,6 +1652,25 @@ def guardar_ajuste(nombre: str, data: dict) -> None:
         "POST",
         "/storage/v1/object/diapositivas/" + urllib.parse.quote(_ajuste_turno(nombre), safe="/"),
         json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        content_type="application/octet-stream",
+        extra={"x-upsert": "true"},
+    )
+
+
+def guardar_privado(nombre: str, data: dict) -> None:
+    """Copia la conexión de YouTube al almacén privado. No imprime el token."""
+    if nombre != "youtube.json" or not configured() or not isinstance(data, dict):
+        return
+    cuerpo = json.dumps({
+        "client_id": str(data.get("client_id") or ""),
+        "client_secret": str(data.get("client_secret") or ""),
+        "refresh_token": str(data.get("refresh_token") or ""),
+        "channel": str(data.get("channel") or "")[:120],
+    }, ensure_ascii=False).encode("utf-8")
+    _request(
+        "POST",
+        "/storage/v1/object/claseclara_privado/" + urllib.parse.quote(nombre, safe="/"),
+        cuerpo,
         content_type="application/octet-stream",
         extra={"x-upsert": "true"},
     )
@@ -2036,6 +2058,436 @@ def asignar_curso(class_id: str, curso_id: str) -> None:
         {"curso_id": curso},
         prefer="return=minimal",
     )
+
+
+def dia_lima(epoch: float) -> str:
+    momento = datetime.fromtimestamp(float(epoch), timezone.utc) - timedelta(hours=5)
+    return f"{momento.year:04d}-{momento.month:02d}-{momento.day:02d}"
+
+
+def corte_mes(epoch: float) -> dict | None:
+    """None del día 1 al 4. Si no, el instante UTC en que empieza el mes en Lima."""
+    momento = datetime.fromtimestamp(float(epoch), timezone.utc) - timedelta(hours=5)
+    if momento.day < 5:
+        return None
+    inicio = datetime(momento.year, momento.month, 1, 5, 0, 0, tzinfo=timezone.utc)
+    return {
+        "mes": f"{momento.year:04d}-{momento.month:02d}",
+        "dia": momento.day,
+        "inicio": int(inicio.timestamp()),
+    }
+
+
+def instante(valor: str) -> int:
+    text = str(valor or "").strip()
+    if not text:
+        return 0
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    elif "T" in text and not re.search(r"[+-]\d{2}:?\d{2}$", text):
+        text += "+00:00"
+    try:
+        momento = datetime.fromisoformat(text)
+    except ValueError:
+        return 0
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=timezone.utc)
+    return int(momento.timestamp())
+
+
+def epoch_de_id(class_id: str) -> int:
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{6}", str(class_id or ""))
+    if not match:
+        return 0
+    year, month, day, hour, minute, second = (int(pieza) for pieza in match.groups())
+    try:
+        marca = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+    except ValueError:
+        return 0
+    return int(marca.timestamp()) + 5 * 3600
+
+
+def clase_vencida(row, inicio: int) -> bool:
+    if not isinstance(row, dict) or not _valid_id(str(row.get("id") or "")):
+        return False
+    stamp = instante(str(row.get("creado") or "")) or epoch_de_id(str(row.get("id") or ""))
+    return bool(stamp and stamp < int(inicio))
+
+
+def _texto_clave(value) -> str:
+    text = str(value or "").strip()
+    if text.startswith("zoom:") and 14 <= len(text) <= 300:
+        return text
+    if re.fullmatch(r"yt:[A-Za-z0-9_-]{11}", text):
+        return text
+    return ""
+
+
+def _id_youtube(value) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", text):
+        return text
+    return ""
+
+
+def _unir_textos(previa, extra, cabe, tope: int) -> list[str]:
+    clean: list[str] = []
+    for item in list(previa or []) + list(extra or []):
+        text = cabe(item)
+        if not text or text in clean:
+            continue
+        clean.append(text)
+    if len(clean) > tope:
+        return clean[-tope:]
+    return clean
+
+
+def estado_mes(data) -> dict:
+    base = data if isinstance(data, dict) else {}
+    return {
+        "mes": str(base.get("mes") or ""),
+        "hecho": bool(base.get("hecho")),
+        "ocupado": int(base.get("ocupado") or 0),
+        "claves": _unir_textos(base.get("claves"), [], _texto_clave, 4000),
+        "ids": _unir_textos(base.get("ids"), [], lambda item: item if _valid_id(str(item)) else "", 4000),
+        "videos": _unir_textos(base.get("videos"), [], _id_youtube, 4000),
+        "videoDia": str(base.get("videoDia") or ""),
+        "permiso": bool(base.get("permiso")),
+        "cursos": _unir_textos(base.get("cursos"), [], lambda item: _curso_id(str(item or "")), 500),
+        "borradas": int(base.get("borradas") or 0),
+        "cursosBorrados": int(base.get("cursosBorrados") or 0),
+    }
+
+
+def abrir_mes(estado: dict, corte: dict) -> dict:
+    base = estado_mes(estado)
+    if base["mes"] == corte.get("mes"):
+        return base
+    base["mes"] = str(corte.get("mes") or "")
+    base["hecho"] = False
+    base["ocupado"] = 0
+    base["cursos"] = []
+    base["borradas"] = 0
+    base["cursosBorrados"] = 0
+    return base
+
+
+def cursos_huecos(tocados, filas) -> list[str]:
+    quedan = set()
+    for row in filas or []:
+        if not isinstance(row, dict):
+            continue
+        curso = _curso_id(str(row.get("curso_id") or ""))
+        if curso:
+            quedan.add(curso)
+    return [curso for curso in _unir_textos(tocados, [], lambda item: _curso_id(str(item or "")), 500) if curso not in quedan]
+
+
+def quitar_orden(data, ids, cursos) -> dict:
+    base = orden_limpio(data)
+    quitados = {str(item) for item in ids or []}
+    fuera = {str(item).lower() for item in cursos or []}
+    salida = {}
+    for key, valores in base.items():
+        if str(key).lower() in fuera:
+            continue
+        resto = [item for item in valores if item not in quitados]
+        if resto:
+            salida[key] = resto
+    return salida
+
+
+def olvidada_de(claves, guardadas=None) -> dict | None:
+    if guardadas is None:
+        guardadas = set(leer_mes()["claves"])
+    else:
+        guardadas = {str(item) for item in guardadas}
+    wanted = set(limpiar_fuentes(claves))
+    if not wanted.intersection(guardadas):
+        return None
+    return {
+        "id": "mes",
+        "titulo": "el mes anterior",
+        "tipo": "enlace",
+        "estado": "lista",
+        "creado": "",
+    }
+
+
+_MES_CACHE = {"en": 0.0, "data": None}
+
+
+def _copiar_mes(data: dict) -> dict:
+    return {
+        "mes": data["mes"],
+        "hecho": data["hecho"],
+        "ocupado": data["ocupado"],
+        "claves": list(data["claves"]),
+        "ids": list(data["ids"]),
+        "videos": list(data["videos"]),
+        "videoDia": data["videoDia"],
+        "permiso": data["permiso"],
+        "cursos": list(data["cursos"]),
+        "borradas": data["borradas"],
+        "cursosBorrados": data["cursosBorrados"],
+    }
+
+
+def leer_mes() -> dict:
+    ahora = time.time()
+    if _MES_CACHE["data"] is not None and ahora - float(_MES_CACHE["en"]) < 30:
+        return _copiar_mes(_MES_CACHE["data"])
+    try:
+        crudo = leer_ajuste("linkeo-mes.json")
+    except Exception:
+        crudo = None
+    data = estado_mes(crudo)
+    _MES_CACHE["en"] = ahora
+    _MES_CACHE["data"] = data
+    return _copiar_mes(data)
+
+
+def guardar_mes(data: dict) -> None:
+    limpio = estado_mes(data)
+    guardar_ajuste("linkeo-mes.json", limpio)
+    _MES_CACHE["en"] = time.time()
+    _MES_CACHE["data"] = limpio
+
+
+def mes_bloquea(class_id: str) -> bool:
+    if not _valid_id(class_id):
+        return False
+    if class_id in leer_mes()["ids"]:
+        return True
+    corte = corte_mes(time.time())
+    if not corte:
+        return False
+    stamp = epoch_de_id(class_id)
+    return bool(stamp and stamp < corte["inicio"])
+
+
+def _unir_estado(estado, claves=None, ids=None, cursos=None, videos=None) -> dict:
+    actual = estado_mes(estado)
+    actual["claves"] = _unir_textos(actual["claves"], claves, _texto_clave, 4000)
+    actual["ids"] = _unir_textos(actual["ids"], ids, lambda item: item if _valid_id(str(item)) else "", 4000)
+    actual["cursos"] = _unir_textos(actual["cursos"], cursos, lambda item: _curso_id(str(item or "")), 500)
+    actual["videos"] = _unir_textos(actual["videos"], videos, _id_youtube, 4000)
+    return actual
+
+
+def _borrar_si_esta(method: str, path: str, body=None) -> None:
+    try:
+        _request(method, path, body, prefer="return=minimal")
+    except engine.AppError as exc:
+        if "404" in str(exc):
+            return
+        raise
+
+
+def _carpeta_ocupada(folder: Path) -> bool:
+    meta_path = folder / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if str(meta.get("status") or "") != "processing":
+        return False
+    try:
+        edad = time.time() - meta_path.stat().st_mtime
+    except OSError:
+        return False
+    return edad < 3600
+
+
+def _claves_carpeta(folder: Path) -> list[str]:
+    try:
+        meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(meta, dict):
+        return []
+    return [clave for clave in fuentes_de_meta(meta) if clave.startswith(("zoom:", "yt:"))]
+
+
+def _borrar_carpeta(class_id: str) -> None:
+    if not _valid_id(class_id):
+        return
+    folder = CLASSES / class_id
+    if not folder.is_dir() or _carpeta_ocupada(folder):
+        return
+    import shutil
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def _ids_locales(corte, ids) -> list[str]:
+    if not CLASSES.is_dir():
+        return []
+    salida = []
+    marcados = set(ids or [])
+    for folder in CLASSES.iterdir():
+        class_id = folder.name
+        if not _valid_id(class_id) or not (folder / "meta.json").is_file():
+            continue
+        if class_id in marcados:
+            salida.append(class_id)
+            continue
+        stamp = epoch_de_id(class_id)
+        if corte and stamp and stamp < corte["inicio"]:
+            salida.append(class_id)
+    return salida
+
+
+def _olvidar_carpetas(corte, estado) -> dict:
+    for class_id in _ids_locales(corte, estado["ids"]):
+        folder = CLASSES / class_id
+        claves = _claves_carpeta(folder)
+        video = next((clave[3:] for clave in claves if clave.startswith("yt:") and len(clave) == 14), "")
+        estado = _unir_estado(estado, claves=claves, ids=[class_id], videos=[video] if video else [])
+        try:
+            guardar_mes(estado)
+        except engine.AppError:
+            continue
+        _borrar_carpeta(class_id)
+    return leer_mes()
+
+
+def _soltar_videos(estado, hoy: str) -> dict:
+    if not estado["videos"] or estado.get("videoDia") == hoy:
+        return estado
+    import youtube_up
+    quedan = []
+    permiso = False
+    for video in estado["videos"]:
+        if permiso:
+            quedan.append(video)
+            continue
+        resultado = youtube_up.borrar_video(video)
+        if resultado == "borrado":
+            continue
+        quedan.append(video)
+        if resultado == "permiso":
+            permiso = True
+    estado = dict(estado)
+    estado["videos"] = quedan
+    estado["videoDia"] = hoy
+    estado["permiso"] = permiso or bool(quedan and estado.get("permiso"))
+    guardar_mes(estado)
+    return leer_mes()
+
+
+def _borrar_remota(row, estado, marca) -> dict:
+    class_id = str(row.get("id") or "")
+    claves = [clave for clave in claves_de_fila(row) if clave.startswith(("zoom:", "yt:"))]
+    video = next((clave[3:] for clave in claves if clave.startswith("yt:") and len(clave) == 14), "")
+    curso = _curso_id(str(row.get("curso_id") or ""))
+    estado = _unir_estado(
+        estado,
+        claves=claves,
+        ids=[class_id],
+        cursos=[curso] if curso else [],
+        videos=[video] if video else [],
+    )
+    guardar_mes(estado)
+    if video and not marca["permiso"]:
+        import youtube_up
+        resultado = youtube_up.borrar_video(video)
+        if resultado == "borrado":
+            estado["videos"] = [item for item in estado["videos"] if item != video]
+        elif resultado == "permiso":
+            marca["permiso"] = True
+            estado["permiso"] = True
+    _borrar_si_esta("DELETE", f"/rest/v1/diapositivas?clase_id=eq.{urllib.parse.quote(class_id)}")
+    _borrar_si_esta("DELETE", "/storage/v1/object/diapositivas", {"prefixes": [class_id]})
+    _borrar_si_esta("DELETE", f"/rest/v1/clases?id=eq.{urllib.parse.quote(class_id)}")
+    _borrar_carpeta(class_id)
+    estado["borradas"] = int(estado["borradas"] or 0) + 1
+    guardar_mes(estado)
+    return leer_mes()
+
+
+def _cerrar_orden(estado, filas) -> tuple[dict, int]:
+    huecos = cursos_huecos(estado["cursos"], filas)
+    borrados = 0
+    for curso in huecos:
+        _borrar_si_esta("DELETE", f"/rest/v1/cursos?id=eq.{curso}")
+        borrados += 1
+    orden = leer_orden()
+    limpio = quitar_orden(orden, estado["ids"], huecos)
+    if limpio != orden:
+        _request(
+            "POST",
+            "/storage/v1/object/diapositivas/" + urllib.parse.quote("ajustes/orden.json", safe="/"),
+            json.dumps(limpio, ensure_ascii=False).encode("utf-8"),
+            content_type="application/octet-stream",
+            extra={"x-upsert": "true"},
+        )
+    return estado, borrados
+
+
+def olvidar_mes() -> str:
+    """Borra en la nube y en esta PC lo subido antes del mes en curso, desde el día 5."""
+    if not configured():
+        return "nada"
+    corte = corte_mes(time.time())
+    estado = leer_mes()
+    if corte is None:
+        _olvidar_carpetas(None, estado)
+        return "espera"
+    estado = abrir_mes(estado, corte)
+    hoy = f"{corte['mes']}-{int(corte['dia']):02d}"
+    if estado["hecho"] and estado["mes"] == corte["mes"]:
+        estado = _olvidar_carpetas(corte, estado)
+        if estado["videos"] and estado["videoDia"] != hoy:
+            _soltar_videos(estado, hoy)
+        return "hecho"
+    ahora = int(time.time())
+    if estado["ocupado"] and ahora - int(estado["ocupado"] or 0) < 20 * 60:
+        return "ocupa"
+    estado["ocupado"] = ahora
+    estado["hecho"] = False
+    try:
+        guardar_mes(estado)
+        marca = {"permiso": False}
+        for _ronda in range(8):
+            filas = _request(
+                "GET",
+                "/rest/v1/clases?select=id,video_url,estudio,curso_id,creado&limit=1000",
+            )
+            if not isinstance(filas, list):
+                filas = []
+            vencidas = [row for row in filas if clase_vencida(row, corte["inicio"])]
+            if not vencidas:
+                estado, borrados = _cerrar_orden(leer_mes(), filas)
+                estado["hecho"] = True
+                estado["ocupado"] = 0
+                estado["cursosBorrados"] = int(estado["cursosBorrados"] or 0) + borrados
+                if estado["videos"]:
+                    estado["videoDia"] = hoy
+                guardar_mes(estado)
+                if estado["videos"]:
+                    estado = _soltar_videos(leer_mes(), hoy)
+                estado = _olvidar_carpetas(corte, leer_mes())
+                if estado["borradas"] or estado["cursosBorrados"] or estado["videos"]:
+                    print(
+                        f"[ClaseClara] mes {corte['mes']}: {estado['borradas']} clases, "
+                        f"{estado['cursosBorrados']} cursos, {len(estado['videos'])} videos pendientes",
+                        flush=True,
+                    )
+                return "hecho"
+            for row in vencidas[:25]:
+                estado = _borrar_remota(row, leer_mes(), marca)
+        estado = leer_mes()
+        estado["ocupado"] = 0
+        guardar_mes(estado)
+        return "sigo"
+    except engine.AppError:
+        try:
+            actual = leer_mes()
+            actual["ocupado"] = 0
+            guardar_mes(actual)
+        except engine.AppError:
+            pass
+        return "falla"
 
 
 def self_test() -> None:
@@ -2463,3 +2915,43 @@ def self_test() -> None:
             raise AssertionError("debio avisar la clave corta")
         assert not dest.exists()
         assert bloqueado.urls == [target, sample]
+    nov4 = datetime(2026, 11, 5, 4, 59, tzinfo=timezone.utc).timestamp()
+    nov5 = datetime(2026, 11, 5, 5, tzinfo=timezone.utc).timestamp()
+    assert dia_lima(nov4) == "2026-11-04"
+    assert dia_lima(nov5) == "2026-11-05"
+    assert corte_mes(nov4) is None
+    corte = corte_mes(nov5)
+    assert corte and corte["mes"] == "2026-11"
+    assert corte["inicio"] == int(datetime(2026, 11, 1, 5, tzinfo=timezone.utc).timestamp())
+    octubre = {"id": "20261031-230000-abcdef", "creado": "2026-11-01T04:00:00+00:00"}
+    noviembre = {"id": "20261101-235757-67e37c", "creado": "2026-11-02T04:59:41+00:00"}
+    assert clase_vencida(octubre, corte["inicio"])
+    assert not clase_vencida(noviembre, corte["inicio"])
+    assert epoch_de_id("20261031-235959-abcdef") < corte["inicio"]
+    assert epoch_de_id("20261101-000000-abcdef") == corte["inicio"]
+    assert not clase_vencida({"id": "20261101-000000-abcdef", "creado": ""}, corte["inicio"])
+    diciembre = corte_mes(datetime(2026, 12, 5, 5, tzinfo=timezone.utc).timestamp())
+    assert diciembre and diciembre["mes"] == "2026-12"
+    assert clase_vencida({"id": "20261130-235959-abcdef", "creado": "2026-12-01T04:59:59+00:00"}, diciembre["inicio"])
+    assert not clase_vencida({"id": "20261201-000000-abcdef", "creado": "2026-12-01T05:00:00+00:00"}, diciembre["inicio"])
+    assert corte_mes(datetime(2027, 1, 5, 5, tzinfo=timezone.utc).timestamp())["mes"] == "2027-01"
+    sigue = "7e0217b2-ae79-48e2-b2f1-a507c273aa91"
+    vacio = "2fd013dc-1362-4115-a326-d5c0135452a9"
+    assert cursos_huecos([sigue, vacio], [{"curso_id": sigue}]) == [vacio]
+    assert cursos_huecos([], [{"curso_id": vacio}]) == []
+    orden = quitar_orden(
+        {sigue: ["20261031-230000-abcdef", "20261102-120000-abcdef"], vacio: ["20261015-120000-abcdef"]},
+        ["20261031-230000-abcdef", "20261015-120000-abcdef"],
+        [vacio],
+    )
+    assert vacio not in orden and orden[sigue] == ["20261102-120000-abcdef"]
+    abierto = abrir_mes({"mes": "2026-10", "hecho": True, "claves": ["yt:dQw4w9WgXcQ"]}, corte)
+    assert abierto["hecho"] is False and abierto["claves"] == ["yt:dQw4w9WgXcQ"] and abierto["mes"] == "2026-11"
+    assert abrir_mes(abierto, corte)["claves"] == ["yt:dQw4w9WgXcQ"]
+    hallada = olvidada_de(
+        ["zoom:ucv-edu-pe.zoom.us/tokenPlay12"],
+        {"zoom:ucv-edu-pe.zoom.us/tokenPlay12"},
+    )
+    assert hallada and hallada["id"] == "mes" and hallada["tipo"] == "enlace"
+    assert olvidada_de(["zoom:ucv-edu-pe.zoom.us/otraClave1"], {"zoom:ucv-edu-pe.zoom.us/tokenPlay12"}) is None
+    assert "password" not in json.dumps(abierto) and "refresh" not in json.dumps(abierto)
