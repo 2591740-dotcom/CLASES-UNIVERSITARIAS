@@ -379,8 +379,16 @@ function enlacesDe(mod) {
   };
   agregar(mod && mod.url, mod && mod.name);
   for (const item of (mod && mod.contents) || []) agregar(item.fileurl, item.filename || (mod && mod.name));
+  const yaHayGrabacion = lista.some((item) => esGrabacionZoom(item.url));
   const plano = textoPlano(mod && mod.description);
-  for (const encontrado of plano.match(/https:\/\/[^\s<>"']+/g) || []) agregar(encontrado, mod && mod.name);
+  for (const encontrado of plano.match(/https:\/\/[^\s<>"']+/g) || []) {
+    if (yaHayGrabacion && esGrabacionZoom(encontrado)) continue;
+    agregar(encontrado, mod && mod.name);
+  }
+  // La lista de Zoom no trajo la grabación: puede estar escrita en la página de la sesión.
+  if (!yaHayGrabacion) {
+    for (const url of recsEnTexto(mod && mod.description)) agregar(url, mod && mod.name);
+  }
   const externos = lista.filter((item) => !item.url.includes("://uvcv.edu.pe/") && !hostDe(item.url).endsWith("uvcv.edu.pe"));
   return (externos.length ? externos : lista).slice(0, 6);
 }
@@ -405,6 +413,10 @@ function tituloDebil(titulo) {
   if (/^(?:y|e|,|\d|\s)+$/i.test(limpio)) return true;
   if (/^(?:sesi[oó]n|session|semana|week|clase)\s+\d{1,3}$/i.test(limpio)) return true;
   return false;
+}
+
+function tituloPlantilla(titulo) {
+  return /nombre del tema seg[uú]n\s+s[ií]labo/i.test(textoPlano(titulo));
 }
 
 function limpiarTitulo(value) {
@@ -454,7 +466,8 @@ function guardarTitulo(mapa, numero, titulo) {
   const limpio = limpiarTitulo(titulo);
   if (!numero || tituloDebil(limpio) || tituloGenerico(limpio)) return;
   const previo = mapa.get(numero) || "";
-  if (!previo || tituloGenerico(previo) || limpio.length > previo.length + 15) mapa.set(numero, limpio);
+  if (tituloPlantilla(limpio) && previo && !tituloPlantilla(previo)) return;
+  if (!previo || tituloPlantilla(previo) || tituloGenerico(previo) || limpio.length > previo.length + 15) mapa.set(numero, limpio);
 }
 
 function marcasDe(plano) {
@@ -690,10 +703,14 @@ function numeroAlFinal(texto) {
   return String(n);
 }
 
+function esGrabacionZoom(url) {
+  return esZoomUrl(url) && /\/rec\/(?:play|share|download)\//i.test(String(url || ""));
+}
+
 function numeroDeRecurso(texto) {
   const limpio = textoPlano(texto);
   if (!limpio) return "";
-  const re = /(?:sesi[oó]n|session|clase)\s*(?:n(?:ro|[°ºo.]*))?\s*[-–—:.]?\s*0*(\d{1,2})\b/gi;
+  const re = /(?:sesi[oó]n|session|clase)\s*(?:n(?:ro|[°ºo.]*))?\s*[-–—:.]?\s*(?:[a-záéíóúñü]{3,24}\s+)?0*(\d{1,2})\b/gi;
   const nums = [];
   let marca = re.exec(limpio);
   while (marca) {
@@ -719,6 +736,16 @@ function empujar(lista, item, limpio) {
 
 function enlaceLimpio(item) {
   return { nombre: item.nombre, url: item.url, zoom: Boolean(item.zoom) };
+}
+
+function recortarEnlaces(lista) {
+  const grabaciones = [];
+  const resto = [];
+  for (const item of lista || []) {
+    if (esGrabacionZoom(item && item.url)) grabaciones.push(item);
+    else resto.push(item);
+  }
+  return [...grabaciones, ...resto].slice(0, Math.min(8, 6 + grabaciones.length));
 }
 
 function pptLimpio(item) {
@@ -779,7 +806,7 @@ function unirFilas(sesiones) {
       }
       absorberFila(base, otra);
     }
-    base.enlaces = base.enlaces.slice(0, 6);
+    base.enlaces = recortarEnlaces(base.enlaces);
     base.presentaciones = base.presentaciones.slice(0, 6);
     salida.push(base);
   }
@@ -858,7 +885,7 @@ export function sesionesDe(secciones, eventos, paginas) {
       fecha_iso: "",
       hora: "",
       orden: "",
-      enlaces: enlaces.slice(0, 6),
+      enlaces: recortarEnlaces(enlaces),
       presentaciones: presentaciones.slice(0, 6),
       _seccion: seccion,
       _mods: propiosMods,
@@ -875,7 +902,7 @@ export function sesionesDe(secciones, eventos, paginas) {
     fila._mods.push(...cargado.mods);
     for (const item of cargado.enlaces) empujar(fila.enlaces, item, enlaceLimpio);
     for (const item of cargado.presentaciones) empujar(fila.presentaciones, item, pptLimpio);
-    fila.enlaces = fila.enlaces.slice(0, 6);
+    fila.enlaces = recortarEnlaces(fila.enlaces);
     fila.presentaciones = fila.presentaciones.slice(0, 6);
   }
   const filas = unirFilas(sesiones);
@@ -2114,6 +2141,74 @@ async function selfTest() {
   assert(doce.enlaces.some((item) => item.url.includes("lec12")), "lectura 12 pasa a la 12");
   assert(doce.enlaces.some((item) => item.url.includes("guia12")), "el archivo 12 pasa a la 12");
   assert(once.enlaces.some((item) => item.url.includes("anio")), "un año no es número de sesión");
+
+  const enPagina = armarCurso({ id: 21, fullname: "Creatividad e innovación" }, {}, [
+    {
+      section: 6,
+      name: "Sesión 5 y 6",
+      summary: "",
+      modules: [
+        {
+          modname: "label",
+          name: "Sesión 05: Nombre del tema según silabo / Sesión 0",
+          description: "Sesión 05: Construir para Aprender: Prototipado de baja fidelidad. / Sesión 06: Innovación Ágil: Producto Mínimo Viable (MVP).",
+        },
+        {
+          modname: "lti",
+          name: "SESIÓN GRABADA 05 - CLASE ASINCRÓNICA",
+          url: "https://uvcv.edu.pe/mod/lti/view.php?id=501",
+          description: "https://ucv-edu-pe.zoom.us/rec/share/grabada05",
+        },
+        {
+          modname: "zoom",
+          name: "SESIÓN GRABADA 06 - CLASE ASINCRÓNICA",
+          url: "https://uvcv.edu.pe/mod/zoom/view.php?id=601",
+          description: "https://ucv-edu-pe.zoom.us/rec/share/grabada06",
+        },
+        pdf("ORIENTACIÓN DEL APRENDIZAJE - SESION 05", "oa05"),
+        pdf("ORIENTACIÓN DEL APRENDIZAJE - SESION 06", "oa06"),
+      ],
+    },
+    {
+      section: 7,
+      name: "Sesión 7 y 8",
+      summary: "",
+      modules: [
+        {
+          modname: "label",
+          name: "Sesión 07: Nombre del tema según silabo",
+          description: "Sesión 07: Verificación de Realidad: Viabilidad y ajuste al mercado. / Sesión 08: Examen Parcial I: Primer Pitch de idea de proyecto.",
+        },
+        {
+          modname: "lti",
+          name: "SESIÓN GRABADA 07- CLASE ASINCRÓNICA",
+          url: "https://uvcv.edu.pe/mod/lti/view.php?id=701",
+          description: '<a href="https://ucv-edu-pe.zoom.us/rec/share/grabada07">ver grabación</a>',
+        },
+        {
+          modname: "zoom",
+          name: "VIDEOCONFERENCIA - SESIÓN 08",
+          url: "https://uvcv.edu.pe/mod/zoom/view.php?id=801",
+          contents: [{ fileurl: "https://ucv-edu-pe.zoom.us/rec/share/lista08", filename: "Grabación" }],
+          description: "https://ucv-edu-pe.zoom.us/rec/share/texto08",
+        },
+      ],
+    },
+  ], []);
+  const grabada = (numero) => enPagina.sesiones.find((item) => item.numero === numero);
+  const cinco = grabada("5");
+  const seis = grabada("6");
+  const siete = grabada("7");
+  const ocho = grabada("8");
+  assert(cinco && seis && siete && ocho, "siguen las sesiones 5 a 8");
+  assert(cinco.titulo === "Construir para Aprender: Prototipado de baja fidelidad", "la 5 usa el tema de la página");
+  assert(seis.titulo === "Innovación Ágil: Producto Mínimo Viable (MVP)", "la 6 usa el tema de la página");
+  assert(cinco.enlaces.some((item) => item.url.includes("grabada05")) && !cinco.enlaces.some((item) => item.url.includes("grabada06")), "la 5 toma la grabación escrita en su página");
+  assert(cinco.enlaces.some((item) => item.url.includes("oa05")) && !cinco.enlaces.some((item) => item.url.includes("oa06")), "la 5 conserva su orientación");
+  assert(seis.enlaces.some((item) => item.url.includes("grabada06")) && !seis.enlaces.some((item) => item.url.includes("grabada05")), "la 6 toma la grabación escrita en su página");
+  assert(seis.enlaces.some((item) => item.url.includes("oa06")), "la 6 conserva su orientación");
+  assert(siete.enlaces.some((item) => item.url.includes("grabada07")), "la 7 toma el enlace oculto en la página");
+  assert(ocho.enlaces.some((item) => item.url.includes("lista08")) && !ocho.enlaces.some((item) => item.url.includes("texto08")), "si Zoom ya trae la grabación no usa la de la página");
 
   const ingles = armarCurso({ id: 13, fullname: "Inglés" }, {}, [
     { section: 1, name: "1. Present simple", summary: "", modules: [] },
