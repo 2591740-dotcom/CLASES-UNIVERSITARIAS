@@ -84,7 +84,7 @@ export default async (req) => {
     console.log(`linkeo-web subidas=${subidas} ya=${ya} avisos=${avisos}`);
     return Response.json({ donde: "web", subidas, ya, avisos, motivo: resultado.motivo || "" });
   }
-  await guardarNube(presencia(actual, { ...base, estado: "subiendo" }));
+  await guardarNube(presencia(actual, { ...base, estado: "subiendo", ocupado: ahora }));
   const sitio = env("URL").replace(/\/$/, "");
   if (sitio && secret) {
     await fetch(`${sitio}/linkeo-turno-web`, {

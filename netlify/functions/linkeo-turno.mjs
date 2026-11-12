@@ -35,8 +35,13 @@ export function decidir(presencia, ahora) {
 export function siguienteTurno(actual, decision, ahora, id) {
   const turno = actual && actual.turno;
   const edad = turno ? Number(ahora) - Number(turno.creado || 0) : 999999;
-  if (turno && (turno.estado === "pedido" || turno.estado === "en-pc" || turno.estado === "web" || turno.estado === "subiendo") && edad < 3 * 3600) {
+  const estado = turno && turno.estado;
+  if (turno && (estado === "pedido" || estado === "en-pc" || estado === "web") && edad < 3 * 3600) {
     return { accion: "espera", turno };
+  }
+  if (turno && estado === "subiendo") {
+    const pulso = Number(turno.ocupado) || Number(turno.creado) || 0;
+    if (Number(ahora) - pulso < 45 * 60) return { accion: "espera", turno };
   }
   if (turno && turno.id === id && (turno.estado === "hecho" || turno.estado === "leido-web")) {
     return { accion: "ya", turno };
@@ -201,6 +206,8 @@ function selfTest() {
   assert(pedido.accion === "pedir" && pedido.turno.donde === "pc" && pedido.turno.estado === "pedido", "pide a la PC");
   assert(siguienteTurno({ turno: pedido.turno }, "web", 2100, "2026-11-02-12").accion === "espera", "no pisa un pedido vivo");
   assert(siguienteTurno({ turno: { id: "2026-11-02-12", estado: "subiendo", creado: 2000 } }, "web", 2100, "2026-11-02-18").accion === "espera", "no pisa una subida de la web");
+  assert(siguienteTurno({ turno: { id: "2026-11-02-12", estado: "subiendo", creado: 2000 } }, "web", 2000 + 50 * 60, "2026-11-02-18").accion === "web", "una subida quieta no bloquea el turno");
+  assert(siguienteTurno({ turno: { id: "2026-11-02-12", estado: "subiendo", creado: 2000, ocupado: 2000 + 40 * 60 } }, "web", 2000 + 50 * 60, "2026-11-02-18").accion === "espera", "una subida con pulso sigue");
   assert(siguienteTurno({ turno: { id: "2026-11-02-12", estado: "hecho", creado: 2000 } }, "pc", 9000, "2026-11-02-12").accion === "ya", "no repite el turno");
   assert(siguienteTurno({ turno: { id: "viejo", estado: "hecho", creado: 1 } }, "web", 9000, "2026-11-02-18").accion === "web", "la web lee si no hay PC");
   assert(autorizado("abc", "abc") && !autorizado("abc", "abd") && !autorizado("", "abc"), "la orden web pide la clave interna");

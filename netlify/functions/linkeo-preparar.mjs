@@ -4,6 +4,7 @@ import { env } from "./linkeo-turno.mjs";
 import { Aviso, entradasDe, fuenteYouTube, fuenteZoom, urlDelVideo } from "./linkeo-subir.mjs";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ClaseClara";
+const UA_PAGINA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const ID_CLASE = /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/;
 const CHAT_URLS = {
   grok: "https://api.x.ai/v1/chat/completions",
@@ -445,8 +446,11 @@ function modeloVoz(ia) {
 async function transcribir(media, ia, pedir) {
   const base = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(modeloVoz(ia))}&smart_format=true&punctuate=true`;
   const una = async (query) => {
+    const headersBajada = { "User-Agent": media.cookie ? UA_PAGINA : USER_AGENT };
+    if (media.cookie) headersBajada.Cookie = media.cookie;
+    if (media.referer) headersBajada.Referer = media.referer;
     const bajada = await pedir(media.url, {
-      headers: { "User-Agent": USER_AGENT },
+      headers: headersBajada,
       redirect: "follow",
     });
     if (!bajada || !bajada.ok || !bajada.body) throw new Aviso("video");

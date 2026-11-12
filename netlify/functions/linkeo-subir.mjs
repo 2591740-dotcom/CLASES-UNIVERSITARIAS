@@ -331,12 +331,18 @@ function idSeguro(value) {
   return /^[A-Za-z0-9_.+\-=~]{1,500}$/.test(String(value || ""));
 }
 
+function idEnPagina(texto, clave) {
+  const match = String(texto || "").match(new RegExp(`["']?${clave}["']?\\s*[:=]\\s*['"]([^'"]+)['"]`));
+  return match && idSeguro(match[1]) ? match[1] : "";
+}
+
 function datosReproductor(html) {
-  const text = String(html || "").replace(/^\uFEFF/, "").replace(/\\"/g, '"');
+  const text = String(html || "").replace(/^\uFEFF/, "");
   const salida = {};
   for (const clave of ["fileId", "meetingId"]) {
-    const match = text.match(new RegExp(`["']?${clave}["']?\\s*[:=]\\s*['"]([^'"]+)['"]`));
-    if (match && idSeguro(match[1])) salida[clave] = match[1];
+    const directo = idEnPagina(text, clave);
+    const plano = directo || idEnPagina(text.replace(/\\"/g, '"'), clave);
+    if (plano) salida[clave] = plano;
   }
   return salida;
 }
@@ -345,10 +351,12 @@ function elegirMp4(info, base) {
   const result = info && typeof info.result === "object" ? info.result : info;
   const bolsa = result && typeof result === "object" ? result : {};
   for (const clave of ["viewMp4WithshareUrl", "viewMp4Url", "shareMp4Url"]) {
-    const crudo = String(bolsa[clave] || "").replace(/\s+/g, " ").trim();
+    const crudo = String(bolsa[clave] || "").trim();
     if (!crudo) continue;
-    let absoluto;
-    try { absoluto = new URL(crudo, base).toString(); } catch { continue; }
+    let absoluto = crudo;
+    if (!/^https:\/\//i.test(crudo)) {
+      try { absoluto = new URL(crudo, base).toString(); } catch { continue; }
+    }
     if (esUrlPublica(absoluto) && absoluto.length <= 16000) return absoluto;
   }
   return "";
@@ -410,21 +418,92 @@ function totalDe(response) {
   return 0;
 }
 
-async function medir(url, pedir = fetch) {
+function cookiesDe(response, previas) {
+  const jar = new Map();
+  for (const parte of String(previas || "").split(";")) {
+    const trozo = parte.trim();
+    const eq = trozo.indexOf("=");
+    if (eq > 0) jar.set(trozo.slice(0, eq), trozo.slice(eq + 1));
+  }
+  const listas = [];
+  if (response && response.headers && typeof response.headers.getSetCookie === "function") {
+    listas.push(...response.headers.getSetCookie());
+  } else if (response && response.headers && typeof response.headers.get === "function") {
+    const uno = response.headers.get("set-cookie");
+    if (uno) listas.push(uno);
+  }
+  for (const cruda of listas) {
+    const par = String(cruda).split(";")[0];
+    const eq = par.indexOf("=");
+    if (eq > 0) jar.set(par.slice(0, eq).trim(), par.slice(eq + 1).trim());
+  }
+  return [...jar.entries()].map(([clave, valor]) => `${clave}=${valor}`).join("; ");
+}
+
+function conSesion(pedir) {
+  let cookie = "";
+  let referer = "";
+  return {
+    async pedir(url) {
+      const headers = {
+        "User-Agent": UA_PAGINA,
+        Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+      };
+      if (cookie) headers.Cookie = cookie;
+      const response = await pedir(url, { headers, redirect: "follow" });
+      if (!response || !esUrlPublica(response.url || url)) throw new Aviso("video");
+      cookie = cookiesDe(response, cookie);
+      const tipo = String(response.headers.get("content-type") || "");
+      if (!tipo.includes("json")) referer = response.url || url;
+      if (tipo.includes("json")) return response.json();
+      return response.text();
+    },
+    sesion() {
+      return { cookie, referer };
+    },
+  };
+}
+
+async function medir(url, pedir = fetch, sesion = {}) {
   if (!esUrlPublica(url)) return null;
+  const headers = {
+    "User-Agent": sesion.cookie ? UA_PAGINA : USER_AGENT,
+    Range: "bytes=0-0",
+  };
+  if (sesion.cookie) headers.Cookie = sesion.cookie;
+  if (sesion.referer) headers.Referer = sesion.referer;
   const response = await pedir(url, {
-    headers: { "User-Agent": USER_AGENT, Range: "bytes=0-0" },
+    headers,
     redirect: "follow",
   });
-  if (!response || !esUrlPublica(response.url || url)) return null;
+  const soltar = () => {
+    try {
+      if (response && response.body) response.body.cancel();
+    } catch {
+      /* la sonda de un byte ya no hace falta */
+    }
+  };
+  if (!response || !esUrlPublica(response.url || url)) {
+    soltar();
+    return null;
+  }
   const tipo = String(response.headers.get("content-type") || "").toLowerCase();
-  if (!tipo || tipo.includes("text/html") || tipo.includes("json")) return null;
+  if (!tipo || tipo.includes("text/html") || tipo.includes("json")) {
+    soltar();
+    return null;
+  }
   const bytes = totalDe(response);
-  if (bytes < 100000 || bytes > MAX_VIDEO) return null;
+  if (bytes < 100000 || bytes > MAX_VIDEO) {
+    soltar();
+    return null;
+  }
+  soltar();
   return {
     url: response.url || url,
     bytes,
     tipo: tipo.startsWith("audio/") ? tipo.slice(0, 80) : "video/mp4",
+    cookie: sesion.cookie || "",
+    referer: sesion.referer || "",
   };
 }
 
@@ -432,17 +511,9 @@ export async function urlDelVideo(playUrl, pedir) {
   const directo = playbackUrl(playUrl);
   const medido = await medir(directo, pedir);
   if (medido) return medido;
-  const media = await resolverGrabacion(playUrl, async (url) => {
-    const response = await pedir(url, {
-      headers: { "User-Agent": UA_PAGINA, Accept: "text/html,application/json;q=0.9,*/*;q=0.8" },
-      redirect: "follow",
-    });
-    if (!response || !esUrlPublica(response.url || url)) throw new Aviso("video");
-    const tipo = String(response.headers.get("content-type") || "");
-    if (tipo.includes("json")) return response.json();
-    return response.text();
-  });
-  const archivo = await medir(media, pedir);
+  const jar = conSesion(pedir);
+  const media = await resolverGrabacion(playUrl, (url) => jar.pedir(url));
+  const archivo = await medir(media, pedir, jar.sesion());
   if (!archivo) throw new Aviso("video");
   return archivo;
 }
@@ -561,8 +632,11 @@ async function poner(sesion, buf, start, total) {
 }
 
 async function bajarYSubir(media, sesion) {
+  const headers = { "User-Agent": media.cookie ? UA_PAGINA : USER_AGENT };
+  if (media.cookie) headers.Cookie = media.cookie;
+  if (media.referer) headers.Referer = media.referer;
   const response = await fetch(media.url, {
-    headers: { "User-Agent": USER_AGENT },
+    headers,
     redirect: "follow",
   });
   if (!response.ok || !response.body || !esUrlPublica(response.url || media.url)) throw new Aviso("video");
@@ -772,6 +846,19 @@ async function pasoLista(lectura, cursos, base, epoch, pedir) {
   };
 }
 
+export async function publicar(item, epoch = Math.floor(Date.now() / 1000), pedir = fetch) {
+  const cursoId = item.cursoId || await asegurarCurso(item.curso);
+  const cred = await credencialesYouTube();
+  if (!cred) throw new Aviso("sinyoutube");
+  const access = await accesoGoogle(cred);
+  if (!access) throw new Aviso("sinyoutube");
+  const media = await urlDelVideo(item.url, pedir);
+  const sesion = await abrirYouTube(access, item.titulo, media.bytes, media.tipo);
+  const watch = await bajarYSubir(media, sesion);
+  const id = await crearClase({ ...item, cursoId }, watch, epoch);
+  return { id, watch, cursoId };
+}
+
 export async function subirUna(lectura, epoch = Math.floor(Date.now() / 1000), pedir = fetch) {
   const cursos = Array.isArray(lectura && lectura.cursos) ? lectura.cursos : [];
   const omitidos = new Set(Array.isArray(lectura && lectura.omitidos) ? lectura.omitidos : []);
@@ -814,15 +901,8 @@ export async function subirUna(lectura, epoch = Math.floor(Date.now() / 1000), p
   if (!pendientes.length) return { hecho: true, subidas: 0, ya, avisos: 0, motivo: "", lectura: base };
   const item = pendientes[0];
   try {
-    item.cursoId = await asegurarCurso(item.curso);
-    const cred = await credencialesYouTube();
-    if (!cred) return { hecho: true, subidas: 0, ya, avisos: 1, motivo: "sinyoutube", lectura: base };
-    const access = await accesoGoogle(cred);
-    if (!access) return { hecho: true, subidas: 0, ya, avisos: 1, motivo: "sinyoutube", lectura: base };
-    const media = await urlDelVideo(item.url, pedir);
-    const sesion = await abrirYouTube(access, item.titulo, media.bytes, media.tipo);
-    const watch = await bajarYSubir(media, sesion);
-    const id = await crearClase(item, watch, epoch);
+    const publicada = await publicar(item, epoch, pedir);
+    item.cursoId = publicada.cursoId;
     propias.add(item.clave);
     return {
       hecho: false,
@@ -830,7 +910,7 @@ export async function subirUna(lectura, epoch = Math.floor(Date.now() / 1000), p
       ya,
       avisos: 0,
       motivo: "",
-      lectura: { ...base, propias: [...propias], enCurso: { id, clave: item.clave }, reintento: 0 },
+      lectura: { ...base, propias: [...propias], enCurso: { id: publicada.id, clave: item.clave }, reintento: 0 },
     };
   } catch (error) {
     const motivo = error && error.motivo ? error.motivo : "video";
@@ -924,6 +1004,44 @@ async function selfTest() {
     aviso = error.motivo;
   }
   assert(aviso === "clave", "la clave corta no se adivina");
+  const vistas = [];
+  const mp4 = "https://file.zoom.us/juntos.mp4";
+  const falsa = async (url, options = {}) => {
+    vistas.push({ url, headers: options.headers || {} });
+    const comun = { get: (nombre) => "", getSetCookie: () => [] };
+    if (url.endsWith("/rec/download/tokenShare1")) {
+      return { url, status: 200, headers: { get: (nombre) => (nombre === "content-type" ? "text/html" : ""), getSetCookie: () => [] }, async text() { return "<html></html>"; } };
+    }
+    if (url === share) {
+      return { url, status: 200, headers: { get: (nombre) => (nombre === "content-type" ? "text/html" : ""), getSetCookie: () => ["zpk=uno"] }, async text() { return htmlShare; } };
+    }
+    if (url.endsWith("/play/share-info/meet-1")) {
+      return { url, status: 200, headers: { get: (nombre) => (nombre === "content-type" ? "application/json" : ""), getSetCookie: () => [] }, async json() { return rutas[url]; } };
+    }
+    if (url.endsWith("/rec/play/tokenPlay")) {
+      return { url, status: 200, headers: { get: (nombre) => (nombre === "content-type" ? "text/html" : ""), getSetCookie: () => ["zpk=dos"] }, async text() { return htmlPlay; } };
+    }
+    if (url.includes("/play/info/")) {
+      return { url, status: 200, headers: { get: (nombre) => (nombre === "content-type" ? "application/json" : ""), getSetCookie: () => [] }, async json() { return rutas[`${base}nws/recording/1.0/play/info/file-1?continueMode=true`]; } };
+    }
+    if (url === mp4) {
+      return {
+        url,
+        status: 206,
+        headers: {
+          get: (nombre) => (nombre === "content-type" ? "video/mp4" : nombre === "content-range" ? "bytes 0-0/200000" : ""),
+          getSetCookie: () => [],
+        },
+        body: { cancel: async () => {} },
+      };
+    }
+    return { url, status: 404, headers: comun, async text() { return ""; } };
+  };
+  const bajada = await urlDelVideo(share, falsa);
+  const pedidoMp4 = vistas.find((item) => item.url === mp4);
+  assert(bajada.bytes === 200000 && bajada.cookie.includes("zpk=dos"), "la bajada conserva la cookie");
+  assert(pedidoMp4 && pedidoMp4.headers.Cookie.includes("zpk=dos") && pedidoMp4.headers.Referer.includes("/rec/play/"), "el video pide cookie y la página");
+  assert(vistas.some((item) => String(item.url).includes("/share-info/") && item.headers.Cookie.includes("zpk=uno")), "share-info lleva la cookie");
   const plantilla = '<html><script>var t = \'<form id="password_form"></form>\';</script><script>window.__data__ = {"fileId":"file-1"};</script></html>';
   assert(await resolverGrabacion(play, async (url) => (
     url === play ? plantilla : { result: { viewMp4Url: "https://file.zoom.us/camara.mp4" } }
