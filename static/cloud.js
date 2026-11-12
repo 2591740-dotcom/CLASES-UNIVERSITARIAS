@@ -2665,7 +2665,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
 
   async function pedirCompartida(id) {
     const raiz = native ? "https://clases-universitarias.netlify.app" : "";
-    const response = await pedir(`${raiz}/.netlify/functions/compartir?id=${encodeURIComponent(id)}`);
+    const response = await pedir(`${raiz}/compartir?id=${encodeURIComponent(id)}`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data || data.id !== id) {
       throw new Error((data && data.error) || "No encuentro esa clase.");

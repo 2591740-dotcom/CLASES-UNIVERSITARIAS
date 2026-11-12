@@ -41,7 +41,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _servir(self, cuerpo: bool = True) -> None:
         ruta = self.path.split("?", 1)[0]
-        if ruta.startswith("/.netlify/functions/"):
+        if ruta.startswith("/.netlify/functions/") or ruta == "/compartir":
             self._reenviar()
             return
         if ruta in ("/LINKEODECLASESCLARA", "/LINKEODECLASESCLARA/"):
