@@ -698,7 +698,63 @@ function dismissConfig() {
   }
 }
 
+function enlacePublico(id) {
+  return `https://clases-universitarias.netlify.app/?clase=${encodeURIComponent(id)}`;
+}
+
+function textoWhatsApp(data) {
+  const study = data && data.study ? data.study : {};
+  const titulo = data && data.title_custom
+    ? (data.title || study.titulo || "Clase")
+    : (study.titulo || (data && data.title) || "Clase");
+  return `${titulo}\n${enlacePublico(data.id)}`;
+}
+
+function abrirWhatsApp(data) {
+  if (!data || !data.id) return;
+  const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(textoWhatsApp(data))}`;
+  const abierta = window.open(url, "_blank", "noopener");
+  if (!abierta) location.assign(url);
+}
+
+function pedirRegistro() {
+  if (!window.CLASECLARA_INVITADO) return;
+  if (!history.state || history.state.cc !== "cuenta") history.pushState({ cc: "cuenta" }, "");
+  window.mostrarPuerta?.("crear", "Para ver otra clase o entrar a un curso, crea una cuenta.");
+}
+
+function volverClaseInvitada() {
+  const data = window.CLASECLARA_CLASE_INVITADA;
+  if (!data) return;
+  if (history.state && history.state.cc === "cuenta") {
+    ignorePop = true;
+    history.back();
+  }
+  pintarClaseInvitada(data);
+}
+
+function pintarClaseInvitada(data) {
+  homeToken += 1;
+  closeWikiPeek();
+  stopSpeech();
+  clearYouTube();
+  stopPoll();
+  clase = data;
+  window.CLASECLARA_CLASE_INVITADA = data;
+  shown = "study";
+  document.title = data.study?.titulo || data.title || "ClaseClara";
+  app.innerHTML = studyHtml(data);
+  bindStudy();
+  programarPaneles();
+  window.renderChrome?.();
+}
+
 function goHome() {
+  if (window.CLASECLARA_INVITADO) {
+    if (document.querySelector("#class-heading")) pedirRegistro();
+    else volverClaseInvitada();
+    return;
+  }
   if (window.CLASECLARA_HOLD) return;
   if (document.querySelector("#prepare-modal")) {
     cerrarPreparar();
@@ -721,6 +777,10 @@ window.addEventListener("popstate", () => {
     ignorePop = false;
     return;
   }
+  if (window.CLASECLARA_INVITADO) {
+    if (!document.querySelector("#class-heading")) volverClaseInvitada();
+    return;
+  }
   if (document.querySelector("#prepare-modal")) {
     cerrarPreparar(true);
     return;
@@ -734,6 +794,13 @@ window.addEventListener("popstate", () => {
 });
 
 window.claseClaraAtras = function () {
+  if (window.CLASECLARA_INVITADO) {
+    if (!document.querySelector("#class-heading")) {
+      volverClaseInvitada();
+      return true;
+    }
+    return false;
+  }
   if (window.CLASECLARA_HOLD) return false;
   const frame = document.querySelector("#frame-lightbox");
   if (frame && !frame.hidden) {
@@ -2537,10 +2604,12 @@ function studyHtml(data) {
   }).join("");
   const player = playerHtml(data);
   const when = durationLabel(data.duration);
+  const invitado = Boolean(window.CLASECLARA_INVITADO);
   return `
     <div class="class-tools">
       <button class="ghost" id="back" type="button">Inicio</button>
-      <button class="ghost danger" id="delete" type="button">Borrar</button>
+      <button class="ghost" id="compartir" type="button">WhatsApp</button>
+      ${invitado ? "" : `<button class="ghost danger" id="delete" type="button">Borrar</button>`}
     </div>
     <div class="layout">
       <section>
@@ -2594,6 +2663,9 @@ function studyHtml(data) {
       </section>
       <aside class="panel chat">
         <h2>Pregunta a la clase</h2>
+        ${invitado ? `
+        <p class="lede">Esta clase se puede ver sin cuenta. Para preguntar, ver otra clase o entrar a un curso, crea la tuya.</p>
+        <button class="primary" id="invitado-cuenta" type="button">Crear cuenta</button>` : `
         <div class="chips">
           <button class="chip" type="button">Explícame la parte difícil como si tuviera 15 años</button>
           <button class="chip" type="button">Hazme un esquema de lo más importante</button>
@@ -2604,7 +2676,7 @@ function studyHtml(data) {
         <form class="composer" id="chat-form">
           <textarea id="question" rows="2" placeholder="Pregunta con lo que se dijo en la clase"></textarea>
           <button class="primary" type="submit">Enviar</button>
-        </form>
+        </form>`}
       </aside>
     </div>`;
 }
@@ -4244,8 +4316,17 @@ function abrirAvisos() {
 
 function bindStudy() {
   document.querySelector("#back").onclick = goHome;
+  const compartir = document.querySelector("#compartir");
+  if (compartir) compartir.onclick = () => abrirWhatsApp(clase);
+  const cuentaInvitada = document.querySelector("#invitado-cuenta");
+  if (cuentaInvitada) cuentaInvitada.onclick = () => pedirRegistro();
   const cursoClase = document.querySelector("#clase-curso");
-  if (cursoClase) {
+  if (cursoClase && window.CLASECLARA_INVITADO) {
+    cursoClase.onclick = (event) => {
+      event.preventDefault();
+      pedirRegistro();
+    };
+  } else if (cursoClase) {
     alTocarCurso(
       cursoClase,
       () => abrirCursoModal("clase"),
@@ -4268,7 +4349,8 @@ function bindStudy() {
   });
   const openAvisos = document.querySelector("#open-avisos");
   if (openAvisos) openAvisos.onclick = () => abrirAvisos();
-  document.querySelector("#delete").onclick = () => removeClass(clase.id);
+  const borrar = document.querySelector("#delete");
+  if (borrar) borrar.onclick = () => removeClass(clase.id);
   const listen = document.querySelector("#listen");
   if (listen) listen.onclick = startSpeech;
   const rate = document.querySelector("#listen-rate");
@@ -4300,7 +4382,8 @@ function bindStudy() {
   document.querySelectorAll(".chip").forEach((chip) => {
     chip.onclick = () => ask(chip.textContent);
   });
-  document.querySelector("#chat-form").onsubmit = (event) => {
+  const chatForm = document.querySelector("#chat-form");
+  if (chatForm) chatForm.onsubmit = (event) => {
     event.preventDefault();
     const box = document.querySelector("#question");
     const text = box.value.trim();
@@ -4496,7 +4579,11 @@ document.addEventListener("keydown", (event) => {
 });
 
 function startClaseClara() {
-  showHome().catch((error) => {
+  const pendiente = window.CLASECLARA_ABRIR || "";
+  window.CLASECLARA_ABRIR = "";
+  showHome().then(() => {
+    if (pendiente) return openClass(pendiente);
+  }).catch((error) => {
     const raw = String((error && error.message) || "");
     const message = /cannot read properties|is not a function|is not defined/i.test(raw)
       ? "No pude abrir las clases. Cierra la aplicación y ábrela otra vez."
@@ -4507,5 +4594,7 @@ function startClaseClara() {
 
 window.renderChrome = renderChrome;
 window.startClaseClara = startClaseClara;
+window.pintarClaseInvitada = pintarClaseInvitada;
+window.volverClaseInvitada = volverClaseInvitada;
 renderChrome();
 if (!window.CLASECLARA_HOLD) startClaseClara();

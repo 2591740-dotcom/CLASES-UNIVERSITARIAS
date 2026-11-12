@@ -2642,12 +2642,44 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
 
   function openApp() {
     const saved = readCuenta();
+    if (window.CLASECLARA_INVITADO && !window.CLASECLARA_ABRIR) {
+      window.CLASECLARA_ABRIR = window.CLASECLARA_INVITADO;
+    }
+    window.CLASECLARA_INVITADO = "";
     window.CLASECLARA_ESTUDIO = saved && saved.universidad
       ? { universidad: saved.universidad, carrera: saved.carrera }
       : null;
     window.CLASECLARA_DENTRO = true;
     window.CLASECLARA_HOLD = false;
     window.startClaseClara?.();
+  }
+
+  function claseDeEnlace() {
+    try {
+      const id = new URL(location.href).searchParams.get("clase") || "";
+      return /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(id) ? id : "";
+    } catch {
+      return "";
+    }
+  }
+
+  async function pedirCompartida(id) {
+    const raiz = native ? "https://clases-universitarias.netlify.app" : "";
+    const response = await pedir(`${raiz}/.netlify/functions/compartir?id=${encodeURIComponent(id)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data || data.id !== id) {
+      throw new Error((data && data.error) || "No encuentro esa clase.");
+    }
+    return data;
+  }
+
+  async function abrirInvitado(id) {
+    window.CLASECLARA_INVITADO = id;
+    window.CLASECLARA_HOLD = true;
+    window.CLASECLARA_DENTRO = false;
+    const data = await pedirCompartida(id);
+    window.pintarClaseInvitada?.(data);
+    window.renderChrome?.();
   }
 
   async function pedirCuenta(accion, email, clave, estudio) {
@@ -2802,9 +2834,20 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
     window.renderChrome?.();
   }
 
+  window.mostrarPuerta = showLanding;
+
   async function checkSaved() {
+    const id = claseDeEnlace();
     const saved = readCuenta();
     if (!saved) {
+      if (id) {
+        try {
+          await abrirInvitado(id);
+        } catch (error) {
+          showLanding("crear", error.message);
+        }
+        return;
+      }
       showLanding("entrar");
       return;
     }
@@ -2813,6 +2856,7 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
       if (data.estado === "ok") {
         writeCuenta(saved.email, saved.clave, data.universidad || saved.universidad, data.carrera || saved.carrera);
         rememberSession(data);
+        if (id) window.CLASECLARA_ABRIR = id;
         openApp();
         return;
       }
@@ -2821,10 +2865,25 @@ Devuelve un solo objeto JSON con las claves titulo, materia, sesion, idea, dific
         return;
       }
       clearCuenta();
+      if (id) {
+        try {
+          await abrirInvitado(id);
+          return;
+        } catch (error) {
+          showLanding("crear", error.message);
+          return;
+        }
+      }
       showLanding("entrar", data.estado === "mal"
         ? "La contraseña guardada ya no coincide. Escríbela de nuevo."
         : "Ese correo ya no está. Puedes crear la cuenta otra vez.");
     } catch (error) {
+      if (id) {
+        try {
+          await abrirInvitado(id);
+          return;
+        } catch { /* sigue a la puerta */ }
+      }
       showLanding("entrar", error.message);
     }
   }

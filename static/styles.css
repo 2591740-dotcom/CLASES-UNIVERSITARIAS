@@ -758,6 +758,7 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 
 .class-tools {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 0;
 }
