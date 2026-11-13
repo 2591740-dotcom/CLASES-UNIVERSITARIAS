@@ -593,7 +593,22 @@ input[type="text"], input[type="password"], input[type="email"], input[type="fil
 .study-head h1 { font-size: 36px; line-height: 1.05; }
 .aviso-action { margin: 0 0 12px; }
 .aviso-action .note { margin: 8px 0 0; }
-.idea { margin: 6px 0 0; max-width: 62ch; }
+.idea { margin: 6px 0 0; max-width: 62ch; line-height: 1.45; }
+.idea.corta {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.idea-mas {
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brass);
+  font-weight: 650;
+}
+.idea-mas[hidden] { display: none; }
 
 .player, .film img, .shot img, .aviso img, #app img {
   max-width: 100%;
@@ -1061,12 +1076,6 @@ body.seeing-frame { overflow: hidden; }
   #keybar { margin-left: auto; width: auto; flex-wrap: nowrap; gap: 6px; }
   #keybar .texty, .fondo .texty { padding: 6px 10px; }
   #keybar .note { display: none; }
-  .idea {
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-  }
   .drop .note { display: none; }
   main, #config { width: calc(100% - 16px); }
   .config-grid { grid-template-columns: 1fr; }
@@ -1501,7 +1510,8 @@ html[data-fondo="oscuro"] .share-modal {
 }
 
 @media print {
-  .top, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal, .share-modal { display: none !important; }
+  .top, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal, .share-modal, .idea-mas { display: none !important; }
+  .idea.corta { display: block; -webkit-line-clamp: unset; overflow: visible; }
   .layout { display: block; }
   html[data-fondo="oscuro"] body,
   body { background: #fff; color: #111; }

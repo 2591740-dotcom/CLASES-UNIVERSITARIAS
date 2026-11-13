@@ -1602,6 +1602,7 @@ Cómo escribir:
 - El titulo es solo el tema de esta sesión, corto. No pongas la materia ni el número de sesión.
 - materia es el nombre del curso, corto. Si no se entiende, va vacía.
 - sesion es solo el número si alguien lo dijo. Si no, va vacía.
+- idea es la presentación de antes del video: un párrafo corto de qué trata la clase, en dos o tres oraciones completas. Cuéntalo entero. No lo cortes ni lo dejes en puntos suspensivos. No repitas solo el título. Esa presentación no se copia en el resumen ni en la explicación.
 - En cada parte de la explicación di la idea, cómo funciona y un ejemplo que sí se haya dicho.
 - El resumen cuenta qué quedó explicado.
 - El esquema es un mapa corto. Cada rama se entiende sola.

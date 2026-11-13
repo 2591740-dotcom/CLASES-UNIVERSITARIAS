@@ -2728,6 +2728,58 @@ function profesorDelCurso(cursoId, classes) {
   return "Sin profesor visible";
 }
 
+function ideaHtml(texto) {
+  const idea = String(texto || "").trim();
+  if (!idea) return "";
+  return `<p class="idea corta" id="idea">${esc(idea)}</p>
+    <button class="idea-mas" id="idea-mas" type="button" hidden aria-expanded="false" aria-controls="idea">Ver más</button>`;
+}
+
+function ajustarIdea() {
+  const idea = document.querySelector("#idea");
+  const button = document.querySelector("#idea-mas");
+  if (!idea || !button || button.getAttribute("aria-expanded") === "true") return;
+  const copia = idea.cloneNode(true);
+  copia.classList.remove("corta");
+  copia.style.position = "absolute";
+  copia.style.visibility = "hidden";
+  copia.style.pointerEvents = "none";
+  copia.style.height = "auto";
+  copia.style.width = `${idea.getBoundingClientRect().width}px`;
+  copia.style.display = "block";
+  idea.insertAdjacentElement("afterend", copia);
+  const linea = parseFloat(getComputedStyle(idea).lineHeight) || 24;
+  const alto = copia.getBoundingClientRect().height;
+  copia.remove();
+  if (alto > linea * 3 + 2) {
+    idea.classList.add("corta");
+    button.hidden = false;
+    button.textContent = "Ver más";
+    button.setAttribute("aria-expanded", "false");
+  } else {
+    idea.classList.remove("corta");
+    button.hidden = true;
+  }
+}
+
+function bindIdea() {
+  const idea = document.querySelector("#idea");
+  const button = document.querySelector("#idea-mas");
+  if (!idea || !button) return;
+  button.onclick = () => {
+    const abrir = idea.classList.contains("corta");
+    idea.classList.toggle("corta", !abrir);
+    button.textContent = abrir ? "Ver menos" : "Ver más";
+    button.setAttribute("aria-expanded", abrir ? "true" : "false");
+  };
+  if (!window.CLASECLARA_IDEA_RESIZE) {
+    window.CLASECLARA_IDEA_RESIZE = true;
+    window.addEventListener("resize", ajustarIdea);
+  }
+  ajustarIdea();
+  requestAnimationFrame(ajustarIdea);
+}
+
 function studyHtml(data) {
   const study = data.study || {};
   const hasNotices = (study.avisos || []).length > 0;
@@ -2761,7 +2813,7 @@ function studyHtml(data) {
             <p class="note" id="clase-profesor">${esc(docente)}</p>
             ${window.claseClaraCloud ? `<p class="mes-aviso">${esc(AVISO_MES)}</p>` : ""}
             <h1 id="class-heading">${esc(shownTitle)}</h1>
-            <p class="idea">${esc(study.idea || "")}</p>
+            ${ideaHtml(study.idea)}
           </div>
         </div>
         ${player}
@@ -4456,6 +4508,7 @@ function abrirAvisos() {
 }
 
 function bindStudy() {
+  bindIdea();
   document.querySelector("#back").onclick = goHome;
   const compartir = document.querySelector("#compartir");
   if (compartir) compartir.onclick = () => abrirCompartir(clase);

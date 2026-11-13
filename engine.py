@@ -2007,7 +2007,7 @@ def study_schema() -> dict:
             "titulo": {"type": "string", "description": "Tema de la sesión, sin la materia ni el número"},
             "materia": {"type": "string", "description": "Nombre corto del curso. Vacío si no se entiende"},
             "sesion": {"type": "string", "description": "Número de sesión si se dijo, solo el número. Vacío si no se dijo"},
-            "idea": {"type": "string", "description": "La idea central en una oración"},
+            "idea": {"type": "string", "description": "Párrafo corto de qué trata la clase, completo, sin puntos suspensivos"},
             "dificil": {"type": "string", "description": "La parte más difícil, explicada con palabras simples"},
             "resumen": {"type": "string"},
             "explicacion": {"type": "array", "items": section},
@@ -3130,6 +3130,7 @@ Cómo escribir:
 - El titulo es solo el tema de esta sesión, corto, como en el cuaderno. Ejemplo: "Bases biológicas del lenguaje". No pongas ahí la materia ni el número de sesión. No uses el nombre del archivo.
 - materia es el nombre del curso, corto, como "Psicología" o "Biología celular". Sácalo de lo que se dice o de una diapositiva. Si arriba ya viene una materia y coincide, consérvala. Si no se entiende, va vacía. No inventes el curso.
 - sesion es el número de esta clase solo si alguien lo dijo, por ejemplo "sesión 4" o "clase 7". Escribe solo el número, como "4". Si no se dijo un número, va vacía. No inventes un número.
+- idea es la presentación de antes del video: un párrafo corto de qué trata la clase, en dos o tres oraciones completas. Cuéntalo entero. No lo cortes ni lo dejes en puntos suspensivos. No repitas solo el título. Esa presentación no se copia en el resumen ni en la explicación.
 - Enseña. En cada parte di la idea, después cómo funciona, y cierra con un ejemplo de la clase o una analogía corta.
 - La explicación difícil tiene que dejar clara la parte que más cuesta, sin adornos.
 - El resumen cuenta qué quedó explicado, no solo de qué se habló.
