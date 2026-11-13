@@ -1413,6 +1413,71 @@ html[data-fondo="oscuro"] .bubble strong {
 
 .course-card .row { margin-top: 8px; }
 
+.share-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  padding: 16px;
+  background: rgba(28, 25, 21, 0.45);
+}
+
+.share-card {
+  width: min(420px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.share-url {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.share-list button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.share-list strong { font-weight: 650; }
+
+.share-list small {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+@media (min-width: 700px) {
+  .share-modal { align-items: flex-start; padding-top: 12vh; }
+}
+
 html[data-fondo="oscuro"] .capsule,
 html[data-fondo="oscuro"] .course-pick.on {
   background: var(--brass-soft);
@@ -1422,14 +1487,21 @@ html[data-fondo="oscuro"] .course-pick.on {
 
 html[data-fondo="oscuro"] .course-card,
 html[data-fondo="oscuro"] .course-pick,
-html[data-fondo="oscuro"] .capsule-edit {
+html[data-fondo="oscuro"] .capsule-edit,
+html[data-fondo="oscuro"] .share-card,
+html[data-fondo="oscuro"] .share-url,
+html[data-fondo="oscuro"] .share-list button {
   background: #141414;
   color: #f7f4ee;
   border-color: #3a3a3a;
 }
 
+html[data-fondo="oscuro"] .share-modal {
+  background: rgba(0, 0, 0, 0.72);
+}
+
 @media print {
-  .top, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal { display: none !important; }
+  .top, .chat, .tabs, .row, .film, #keybar, #config, .wiki-peek, .course-modal, .share-modal { display: none !important; }
   .layout { display: block; }
   html[data-fondo="oscuro"] body,
   body { background: #fff; color: #111; }

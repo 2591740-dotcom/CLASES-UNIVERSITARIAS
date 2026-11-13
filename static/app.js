@@ -702,19 +702,155 @@ function enlacePublico(id) {
   return `https://clases-universitarias.netlify.app/?clase=${encodeURIComponent(id)}`;
 }
 
-function textoWhatsApp(data) {
+function tituloCompartido(data) {
   const study = data && data.study ? data.study : {};
-  const titulo = data && data.title_custom
-    ? (data.title || study.titulo || "Clase")
-    : (study.titulo || (data && data.title) || "Clase");
-  return `${titulo}\n${enlacePublico(data.id)}`;
+  if (data && data.title_custom) return data.title || study.titulo || "Clase";
+  return study.titulo || (data && data.title) || "Clase";
 }
 
-function abrirWhatsApp(data) {
+function textoCompartido(data) {
+  return `${tituloCompartido(data)}\n${enlacePublico(data.id)}`;
+}
+
+function destinoCompartir(kind, data) {
+  const url = enlacePublico(data.id);
+  const titulo = tituloCompartido(data);
+  const texto = textoCompartido(data);
+  if (kind === "whatsapp") return `https://api.whatsapp.com/send?text=${encodeURIComponent(texto)}`;
+  if (kind === "facebook") return `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`;
+  if (kind === "telegram") return `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(titulo)}`;
+  if (kind === "correo") return `mailto:?subject=${encodeURIComponent(titulo)}&body=${encodeURIComponent(texto)}`;
+  return "";
+}
+
+function abrirEnlaceExterno(url) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = url.startsWith("mailto:") ? "_self" : "_blank";
+  link.rel = "noopener noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function copiarTexto(texto) {
+  const manual = () => {
+    const input = document.createElement("textarea");
+    input.value = texto;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    document.body.appendChild(input);
+    input.focus();
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    input.remove();
+    return ok;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(texto).then(() => true).catch(() => manual());
+  }
+  return Promise.resolve(manual());
+}
+
+function onCompartirEscape(event) {
+  if (event.key === "Escape") cerrarCompartir();
+}
+
+function cerrarCompartir() {
+  document.querySelector("#share-modal")?.remove();
+  document.removeEventListener("keydown", onCompartirEscape);
+  const trigger = document.querySelector("#compartir");
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+}
+
+function avisoCompartir(texto) {
+  const aviso = document.querySelector("#share-aviso");
+  if (!aviso) return;
+  aviso.hidden = false;
+  aviso.textContent = texto;
+}
+
+async function usarCompartir(kind, data) {
+  if (kind === "enlace") {
+    const ok = await copiarTexto(enlacePublico(data.id));
+    if (ok) {
+      avisoCompartir("Enlace copiado.");
+      return;
+    }
+    const nodo = document.querySelector(".share-url");
+    if (nodo) {
+      const range = document.createRange();
+      range.selectNodeContents(nodo);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    avisoCompartir("Mantén pulsado el enlace de arriba y elige Copiar.");
+    return;
+  }
+  if (kind === "mas") {
+    try {
+      await navigator.share({
+        title: tituloCompartido(data),
+        text: tituloCompartido(data),
+        url: enlacePublico(data.id),
+      });
+      cerrarCompartir();
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      avisoCompartir("No pude abrir las otras aplicaciones.");
+    }
+    return;
+  }
+  const url = destinoCompartir(kind, data);
+  if (!url) return;
+  abrirEnlaceExterno(url);
+  cerrarCompartir();
+}
+
+function abrirCompartir(data) {
   if (!data || !data.id) return;
-  const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(textoWhatsApp(data))}`;
-  const abierta = window.open(url, "_blank", "noopener");
-  if (!abierta) location.assign(url);
+  cerrarCompartir();
+  const opciones = [
+    ["whatsapp", "WhatsApp", "Enviar el enlace por WhatsApp"],
+    ["enlace", "Copiar enlace", "Queda en el portapapeles"],
+    ["facebook", "Facebook", "Publicar el enlace"],
+    ["telegram", "Telegram", "Enviar el enlace por Telegram"],
+    ["correo", "Correo", "Escribir un mensaje con el enlace"],
+  ];
+  if (typeof navigator.share === "function") {
+    opciones.push(["mas", "Más opciones", "Otras aplicaciones"]);
+  }
+  const lista = opciones.map(([id, nombre, detalle]) => `
+    <button type="button" data-share="${esc(id)}">
+      <strong>${esc(nombre)}</strong>
+      <small>${esc(detalle)}</small>
+    </button>`).join("");
+  const modal = document.createElement("div");
+  modal.id = "share-modal";
+  modal.className = "share-modal";
+  modal.innerHTML = `
+    <div class="share-card" role="dialog" aria-modal="true" aria-labelledby="share-titulo">
+      <p class="kicker" id="share-titulo">Compartir</p>
+      <p class="share-url">${esc(enlacePublico(data.id))}</p>
+      <div class="share-list">${lista}</div>
+      <p class="note" id="share-aviso" hidden></p>
+      <button class="ghost" id="share-cerrar" type="button">Cerrar</button>
+    </div>`;
+  document.body.appendChild(modal);
+  document.addEventListener("keydown", onCompartirEscape);
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) cerrarCompartir();
+  });
+  modal.querySelector("#share-cerrar").onclick = () => cerrarCompartir();
+  modal.querySelectorAll("[data-share]").forEach((button) => {
+    button.onclick = () => { usarCompartir(button.dataset.share, data); };
+  });
+  const trigger = document.querySelector("#compartir");
+  if (trigger) trigger.setAttribute("aria-expanded", "true");
 }
 
 function pedirRegistro() {
@@ -750,6 +886,7 @@ function pintarClaseInvitada(data) {
 }
 
 function goHome() {
+  cerrarCompartir();
   if (window.CLASECLARA_INVITADO) {
     if (document.querySelector("#class-heading")) pedirRegistro();
     else volverClaseInvitada();
@@ -794,6 +931,10 @@ window.addEventListener("popstate", () => {
 });
 
 window.claseClaraAtras = function () {
+  if (document.querySelector("#share-modal")) {
+    cerrarCompartir();
+    return true;
+  }
   if (window.CLASECLARA_INVITADO) {
     if (!document.querySelector("#class-heading")) {
       volverClaseInvitada();
@@ -2608,7 +2749,7 @@ function studyHtml(data) {
   return `
     <div class="class-tools">
       <button class="ghost" id="back" type="button">Inicio</button>
-      <button class="ghost" id="compartir" type="button">WhatsApp</button>
+      <button class="ghost" id="compartir" type="button" aria-haspopup="dialog" aria-expanded="false">Compartir</button>
       ${invitado ? "" : `<button class="ghost danger" id="delete" type="button">Borrar</button>`}
     </div>
     <div class="layout">
@@ -4317,7 +4458,7 @@ function abrirAvisos() {
 function bindStudy() {
   document.querySelector("#back").onclick = goHome;
   const compartir = document.querySelector("#compartir");
-  if (compartir) compartir.onclick = () => abrirWhatsApp(clase);
+  if (compartir) compartir.onclick = () => abrirCompartir(clase);
   const cuentaInvitada = document.querySelector("#invitado-cuenta");
   if (cuentaInvitada) cuentaInvitada.onclick = () => pedirRegistro();
   const cursoClase = document.querySelector("#clase-curso");
